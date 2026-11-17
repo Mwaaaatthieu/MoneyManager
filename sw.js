@@ -1,5 +1,5 @@
 // Service worker : met l'application en cache pour un usage hors connexion.
-const CACHE = 'moneymanager-v2';
+const CACHE = 'moneymanager-v3';
 const ASSETS = ['./', 'index.html', 'css/styles.css', 'js/calc.js', 'js/bnp-import.js', 'js/app.js',
   'js/vendor/pdfjs/pdf.min.mjs', 'js/vendor/pdfjs/pdf.worker.min.mjs', 'manifest.webmanifest',
   'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png'];

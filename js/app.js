@@ -710,9 +710,10 @@
         <p class="hint">Vos données restent uniquement sur cet appareil. Exportez-les régulièrement pour ne rien perdre
         (ou pour les transférer sur un autre appareil).</p>
         <div class="row">
-          <button class="btn" data-action="export">Exporter (JSON)</button>
-          <label class="btn">Importer<input type="file" accept="application/json,.json" data-action="import" hidden></label>
+          <button class="btn" data-action="export">Exporter</button>
+          <label class="btn">Restaurer un fichier<input type="file" accept="application/json,.json,text/plain,.txt" data-action="import" hidden></label>
         </div>
+        <button class="btn small" data-action="paste-import" style="margin-top:8px">Coller une sauvegarde</button>
         <p class="hint">${state.entries.length} ligne(s) saisie(s) · ${state.planned.length} charge(s) programmée(s).</p>
       </div>
       <div class="card">
@@ -883,18 +884,105 @@
     return { entries: e, planned };
   }
 
-  function exportData() {
-    const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
-    const name = `moneymanager-${new Date().toISOString().slice(0, 10)}.json`;
-    const file = new File([blob], name, { type: 'application/json' });
-    if (navigator.canShare && navigator.canShare({ files: [file] })) {
-      navigator.share({ files: [file], title: 'Sauvegarde MoneyManager' }).catch(() => {});
-      return;
-    }
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob); a.download = name;
-    document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  // ---------------------------------------------------------------- sauvegarde (export / import)
+  // Chaque méthode est lancée directement par un appui (exigé par iOS/Android pour partager ou télécharger)
+  // et affiche toujours un message : plus aucun échec silencieux.
+
+  const backupName = () => `moneymanager-${new Date().toISOString().slice(0, 10)}.json`;
+  const backupText = () => JSON.stringify(state, null, 2);
+  const isIosStandalone = () => window.navigator.standalone === true;
+
+  function openExport() {
+    const kb = Math.max(1, Math.round(new Blob([backupText()]).size / 1024));
+    const fileShare = typeof navigator.canShare === 'function'
+      && navigator.canShare({ files: [new File(['{}'], 'test.json', { type: 'application/json' })] });
+    sheet().innerHTML = `
+      <form method="dialog">
+        <h2>Exporter mes données</h2>
+        <p class="hint">${state.entries.length} ligne(s), ${state.planned.length} charge(s) programmée(s) · ${kb} Ko.
+        Gardez la sauvegarde hors du téléphone (Drive, iCloud, e-mail à vous-même…).</p>
+        <div style="display:grid;gap:8px;margin-top:12px">
+          ${fileShare ? '<button type="button" class="btn primary" data-export="share">Partager le fichier…</button>' : ''}
+          <button type="button" class="btn ${fileShare ? '' : 'primary'}" data-export="download">Télécharger le fichier</button>
+          <button type="button" class="btn" data-export="copy">Copier le texte de la sauvegarde</button>
+          <button type="button" class="btn" data-export="close">Fermer</button>
+        </div>
+        ${isIosStandalone() ? '<p class="hint">Sur iPhone, depuis l\'application installée, le téléchargement peut être bloqué par iOS : utilisez « Partager » (› Enregistrer dans Fichiers) ou « Copier ».</p>' : ''}
+        <p class="hint" id="export-status" role="status"></p>
+      </form>`;
+    const status = (msg, bad) => {
+      const el = sheet().querySelector('#export-status');
+      el.textContent = msg; el.className = 'hint ' + (bad ? 'neg' : 'pos');
+    };
+    sheet().querySelectorAll('[data-export]').forEach((btn) => btn.addEventListener('click', () => {
+      const how = btn.dataset.export;
+      if (how === 'close') { sheet().close(); return; }
+      const text = backupText();
+      if (how === 'share') {
+        const file = new File([text], backupName(), { type: 'application/json' });
+        navigator.share({ files: [file] })
+          .then(() => status('Sauvegarde partagée.'))
+          .catch((e) => {
+            if (e && e.name === 'AbortError') status('Partage annulé.', true);
+            else status(`Partage impossible (${e && e.message ? e.message : e}). Essayez « Télécharger » ou « Copier ».`, true);
+          });
+      } else if (how === 'download') {
+        try {
+          const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+          const a = document.createElement('a');
+          a.href = url; a.download = backupName(); a.rel = 'noopener';
+          document.body.appendChild(a); a.click(); a.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 60000);
+          status(`Téléchargement de ${backupName()} lancé. Rien n'apparaît ? Utilisez « Partager » ou « Copier ».`);
+        } catch (e) {
+          status('Téléchargement impossible : ' + e.message, true);
+        }
+      } else if (how === 'copy') {
+        copyText(text).then(() => status('Texte copié : collez-le dans une note ou un e-mail. Pour le restaurer : Réglages › Coller une sauvegarde.'))
+          .catch(() => status('Copie impossible sur ce navigateur.', true));
+      }
+    }));
+    sheet().showModal();
+  }
+
+  function copyText(text) {
+    if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(text);
+    return new Promise((resolve, reject) => {
+      const ta = document.createElement('textarea');
+      ta.value = text; ta.setAttribute('readonly', ''); ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      const ok = document.execCommand('copy'); ta.remove();
+      ok ? resolve() : reject(new Error('copy'));
+    });
+  }
+
+  function restoreBackup(txt) {
+    let s;
+    try { s = JSON.parse(txt); } catch (e) { throw new Error('ce n\'est pas une sauvegarde MoneyManager (JSON illisible)'); }
+    if (!s || !Array.isArray(s.entries)) throw new Error('ce n\'est pas une sauvegarde MoneyManager');
+    if (!confirm(`Restaurer ${s.entries.length} ligne(s) ? Les données actuelles seront remplacées.`)) return false;
+    localStorage.setItem(KEY, JSON.stringify(s));
+    state = load(); applyTheme(); render(); toast('Sauvegarde restaurée');
+    return true;
+  }
+
+  function openPasteImport() {
+    sheet().innerHTML = `
+      <form method="dialog">
+        <h2>Coller une sauvegarde</h2>
+        <p class="hint">Collez le texte copié avec « Exporter › Copier le texte ».</p>
+        <textarea id="paste-backup" rows="8" style="width:100%;border-radius:10px;border:1px solid var(--border);background:var(--surface-2);padding:10px;font:13px ui-monospace,monospace" placeholder='{"version":1,"entries":[…]}'></textarea>
+        <p class="hint neg" id="paste-status"></p>
+        <div class="row" style="margin-top:8px">
+          <button type="button" class="btn" data-paste="cancel">Annuler</button>
+          <button type="button" class="btn primary" data-paste="ok">Restaurer</button>
+        </div>
+      </form>`;
+    sheet().querySelector('[data-paste="cancel"]').addEventListener('click', () => sheet().close());
+    sheet().querySelector('[data-paste="ok"]').addEventListener('click', () => {
+      try { if (restoreBackup(sheet().querySelector('#paste-backup').value)) sheet().close(); } catch (e) { sheet().querySelector('#paste-status').textContent = 'Restauration impossible : ' + e.message; }
+    });
+    sheet().showModal();
   }
 
   function applyTheme() {
@@ -945,7 +1033,8 @@
     'plan-regul': planRegul,
     'reset-params': () => { if (confirm('Rétablir les paramètres fiscaux par défaut ?')) { T().params = JSON.parse(JSON.stringify(C.DEFAULT_TAX_PARAMS)); save(); render(); } },
     theme: (el) => { state.settings.theme = el.dataset.v; save(); applyTheme(); render(); },
-    export: exportData,
+    export: openExport,
+    'paste-import': openPasteImport,
     demo: () => {
       if ((state.entries.length || state.planned.length) && !confirm('Remplacer vos données actuelles par l\'exemple ?')) return;
       Object.assign(state, demoData()); save(); render(); toast('Exemple chargé');
@@ -976,13 +1065,8 @@
     const el = ev.target;
     if (el.dataset.action === 'toggle-variable') handlers['toggle-variable'](el);
     if (el.dataset.action === 'import' && el.files[0]) {
-      el.files[0].text().then((txt) => {
-        const s = JSON.parse(txt);
-        if (!Array.isArray(s.entries)) throw new Error('fichier invalide');
-        if (!confirm(`Importer ${s.entries.length} ligne(s) ? Les données actuelles seront remplacées.`)) return;
-        localStorage.setItem(KEY, JSON.stringify(s));
-        state = load(); applyTheme(); render(); toast('Import réussi');
-      }).catch((e) => toast('Import impossible : ' + e.message));
+      el.files[0].text().then(restoreBackup).catch((e) => toast('Restauration impossible : ' + e.message))
+        .finally(() => { el.value = ''; });
     }
     if (el.dataset.bind && (el.tagName === 'SELECT' || el.type === 'checkbox')) bindInput(el);
     if (el.dataset.action === 'import-pdf' && el.files[0]) readStatement(el.files[0]);
