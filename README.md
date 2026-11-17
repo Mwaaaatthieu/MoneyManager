@@ -43,6 +43,12 @@ npm test    # tests du moteur de calcul (Node ≥ 18)
 - `js/vendor/pdfjs/` : [pdf.js](https://mozilla.github.io/pdf.js/) 4.10.38 (Apache-2.0), embarqué pour fonctionner hors connexion.
 - `js/app.js` : interface (vanilla JS, sans dépendance ni build).
 
+### Publier une nouvelle version
+
+Incrémentez `APP_VERSION` (et `APP_VERSION_DATE`) dans `js/version.js` à chaque mise en ligne :
+le numéro s'affiche dans Réglages, qui indique aussi si une version plus récente est disponible,
+et le changement force les téléphones à renouveler le cache hors connexion.
+
 > Ne versionnez jamais de relevé réel : `*.pdf` est exclu par `.gitignore`.
 
 ## Paramètres fiscaux

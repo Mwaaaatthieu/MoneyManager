@@ -694,7 +694,14 @@
 
   function viewSettings() {
     const th = state.settings.theme;
+    setTimeout(checkVersion, 0);
     return `
+      <div class="card">
+        <h2>Version de l'application</h2>
+        <div class="kv"><span>Version installée</span><span class="num"><b>${esc(APP_VERSION)}</b> · ${fmtDate(window.APP_VERSION_DATE)}</span></div>
+        <p class="hint" id="version-status" role="status">Vérification de la dernière version…</p>
+        <div id="version-action"></div>
+      </div>
       <div class="card">
         <h2>Apparence</h2>
         <div class="seg">${[['auto', 'Auto'], ['light', 'Clair'], ['dark', 'Sombre']].map(([v, l]) => `<button data-action="theme" data-v="${v}" class="${th === v ? 'on' : ''}">${l}</button>`).join('')}</div>
@@ -884,6 +891,39 @@
     return { entries: e, planned };
   }
 
+  // ---------------------------------------------------------------- version
+
+  const APP_VERSION = window.APP_VERSION || '?';
+  const fmtDate = (iso) => (iso ? iso.split('-').reverse().join('/') : '');
+
+  /** Compare la version chargée avec celle publiée sur le serveur (sans passer par les caches). */
+  function checkVersion() {
+    const statusEl = document.getElementById('version-status');
+    if (!statusEl) return;
+    const set = (html, cls) => { statusEl.innerHTML = html; statusEl.className = 'hint ' + (cls || ''); };
+    if (!navigator.onLine) { set('Hors connexion : impossible de vérifier s\'il existe une version plus récente.'); return; }
+    fetch('js/version.js?t=' + Date.now(), { cache: 'no-store' })
+      .then((r) => { if (!r.ok) throw new Error(r.status); return r.text(); })
+      .then((txt) => {
+        const m = txt.match(/APP_VERSION\s*=\s*['"]([^'"]+)['"]/);
+        if (!m) throw new Error('format');
+        if (m[1] === APP_VERSION) { set('✓ Vous utilisez la dernière version.', 'pos'); return; }
+        set(`Une nouvelle version <b>${esc(m[1])}</b> est disponible.`, 'neg');
+        const act = document.getElementById('version-action');
+        if (act) act.innerHTML = '<button class="btn primary block" data-action="update-app">Mettre à jour maintenant</button>';
+      })
+      .catch(() => set('Impossible de vérifier la dernière version pour le moment.'));
+  }
+
+  async function updateApp() {
+    try {
+      const reg = 'serviceWorker' in navigator ? await navigator.serviceWorker.getRegistration() : null;
+      if (reg) await reg.update();
+      if ('caches' in window) await Promise.all((await caches.keys()).map((k) => caches.delete(k)));
+    } catch (e) { /* on recharge quand même */ }
+    location.reload();
+  }
+
   // ---------------------------------------------------------------- sauvegarde (export / import)
   // Chaque méthode est lancée directement par un appui (exigé par iOS/Android pour partager ou télécharger)
   // et affiche toujours un message : plus aucun échec silencieux.
@@ -1035,6 +1075,7 @@
     theme: (el) => { state.settings.theme = el.dataset.v; save(); applyTheme(); render(); },
     export: openExport,
     'paste-import': openPasteImport,
+    'update-app': updateApp,
     demo: () => {
       if ((state.entries.length || state.planned.length) && !confirm('Remplacer vos données actuelles par l\'exemple ?')) return;
       Object.assign(state, demoData()); save(); render(); toast('Exemple chargé');
