@@ -12,6 +12,10 @@ Application web installable sur téléphone (PWA) pour réduire la charge mental
 - **Impôts** — comparaison abattement 10 % / frais réels (barème kilométrique, repas, télétravail, autres frais),
   impôt estimé (quotient familial et son plafonnement, décote), taux de prélèvement à la source adapté,
   régularisation attendue — qu'on peut ajouter d'un clic aux prévisions.
+- **Import de relevés BNP Paribas (PDF)** — depuis l'onglet Mois : les opérations sont extraites du relevé,
+  vérifiées avec le « Total des opérations », pré-catégorisées (les prélèvements marqués fixes, les virements
+  entre vos propres comptes exclus), puis vous validez. Vos corrections sont retenues pour les imports suivants
+  et les opérations déjà importées sont ignorées. **Le PDF est lu dans le navigateur et n'est jamais envoyé.**
 - **Réglages** — thème, export / import JSON, données d'exemple.
 
 Aucune API, aucun serveur : les données restent dans le navigateur du téléphone (`localStorage`).
@@ -35,7 +39,11 @@ npm test    # tests du moteur de calcul (Node ≥ 18)
 ```
 
 - `js/calc.js` : calculs purs (bilan, prévisions, impôt) — testés dans `tests/`.
+- `js/bnp-import.js` : lecture et analyse des relevés BNP Paribas — testé sur un relevé fictif dans `tests/`.
+- `js/vendor/pdfjs/` : [pdf.js](https://mozilla.github.io/pdf.js/) 4.10.38 (Apache-2.0), embarqué pour fonctionner hors connexion.
 - `js/app.js` : interface (vanilla JS, sans dépendance ni build).
+
+> Ne versionnez jamais de relevé réel : `*.pdf` est exclu par `.gitignore`.
 
 ## Paramètres fiscaux
 

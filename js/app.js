@@ -6,7 +6,8 @@
 
   const DEFAULT_CATS = {
     expense: ['Logement', 'Alimentation', 'Transport', 'Énergie', 'Assurances', 'Abonnements', 'Santé',
-      'Loisirs', 'Shopping', 'Enfants', 'Impôts & taxes', 'Crédit', 'Cadeaux', 'Autre'],
+      'Loisirs', 'Restaurants & sorties', 'Shopping', 'Enfants', 'Impôts & taxes', 'Crédit', 'Cadeaux',
+      'Frais bancaires', 'Retraits d\'espèces', 'Virements', 'Compte joint', 'Virements internes', 'Autre'],
     income: ['Salaire', 'Prime', 'Allocations', 'Remboursement', 'Revenus locatifs', 'Autre revenu'],
   };
 
@@ -27,7 +28,7 @@
     };
   }
   function defaultState() {
-    return { version: 1, entries: [], planned: [], settings: { includeVariable: true, theme: 'auto' }, tax: defaultTax() };
+    return { version: 1, entries: [], planned: [], importRules: {}, settings: { includeVariable: true, theme: 'auto' }, tax: defaultTax() };
   }
   function load() {
     try {
@@ -50,7 +51,7 @@
     try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) { toast('Enregistrement impossible : ' + e.message); }
   }
 
-  const ui = { tab: 'month', month: C.monthKey() };
+  const ui = { tab: 'month', month: C.monthKey(), imp: null };
 
   // ---------------------------------------------------------------- utilitaires
 
@@ -170,6 +171,7 @@
     const incomes = list.filter((e) => e.type === 'income').sort((a, b) => b.amount - a.amount);
     const expenses = list.filter((e) => e.type === 'expense')
       .sort((a, b) => (b.recurring - a.recurring) || (b.amount - a.amount));
+    const imported = list.filter((e) => e.importKey).length;
     const planned = state.planned.filter((p) => p.month === m);
     const prev = C.addMonths(m, -1);
     const labels = new Set(list.map((e) => e.label.toLowerCase()));
@@ -179,7 +181,7 @@
       <li class="tap" data-action="edit-entry" data-id="${e.id}">
         <div class="grow">
           <div class="title">${esc(e.label)}${e.recurring ? '<span class="tag">fixe</span>' : ''}</div>
-          <div class="meta">${esc(e.category || '')}</div>
+          <div class="meta">${e.date ? e.date.slice(8, 10) + '/' + e.date.slice(5, 7) + ' · ' : ''}${esc(e.category || '')}</div>
         </div>
         <div class="num ${e.type === 'income' ? 'pos' : ''}">${e.type === 'income' ? '+' : '−'}${eur(e.amount)}</div>
       </li>`;
@@ -201,6 +203,11 @@
         <div class="stat wide"><div class="lbl">Solde du mois (épargne)</div>
           <div class="val num ${cls(s.balance)}">${signed(s.balance)}</div>
           <div class="sub">Taux d'épargne : ${pct(s.savingsRate)}</div></div>
+      </div>
+
+      <div class="row" style="margin-top:10px">
+        <button class="btn small" data-action="open-import">📄 Importer un relevé PDF</button>
+        ${imported ? `<span class="hint" style="align-self:center">${imported} ligne(s) importée(s)</span>` : ''}
       </div>
 
       ${toCopy.length ? `
@@ -523,6 +530,166 @@
     o[keys[keys.length - 1]] = value;
   }
 
+  // ---------------------------------------------------------------- vue : Import de relevé
+
+  let pdfjsPromise = null;
+  function loadPdfjs() {
+    if (!pdfjsPromise) {
+      const base = new URL('js/vendor/pdfjs/', document.baseURI);
+      pdfjsPromise = import(new URL('pdf.min.mjs', base).href).then((lib) => {
+        lib.GlobalWorkerOptions.workerSrc = new URL('pdf.worker.min.mjs', base).href;
+        return lib;
+      }).catch((e) => { pdfjsPromise = null; throw e; });
+    }
+    return pdfjsPromise;
+  }
+
+  async function readStatement(file) {
+    ui.imp = { loading: true, fileName: file.name };
+    render();
+    try {
+      const lib = await loadPdfjs();
+      const pages = await window.BnpImport.extractPages(lib, new Uint8Array(await file.arrayBuffer()));
+      const st = window.BnpImport.parseStatement(pages);
+      const known = new Set(state.entries.map((e) => e.importKey).filter(Boolean));
+      const rows = st.operations.map((op) => {
+        const sug = window.BnpImport.suggest(op, state.importRules);
+        const duplicate = known.has(op.importKey);
+        return { op, sug, include: !duplicate && !sug.ignore, category: sug.category, recurring: sug.recurring, duplicate };
+      });
+      ui.imp = { fileName: file.name, st, rows };
+    } catch (e) {
+      console.error(e);
+      ui.imp = { error: e.message || String(e), fileName: file.name };
+    }
+    render();
+  }
+
+  function importTotals() {
+    const sel = ui.imp.rows.filter((r) => r.include);
+    return {
+      n: sel.length,
+      out: sel.filter((r) => r.op.type === 'expense').reduce((a, r) => a + r.op.amount, 0),
+      in: sel.filter((r) => r.op.type === 'income').reduce((a, r) => a + r.op.amount, 0),
+    };
+  }
+  const importFooter = () => {
+    const t = importTotals();
+    return `Importer ${t.n} ligne(s) · −${eur0(t.out)} / +${eur0(t.in)}`;
+  };
+
+  function viewImport() {
+    const imp = ui.imp;
+    const picker = `
+      <label class="btn primary block">Choisir un relevé PDF<input type="file" accept="application/pdf,.pdf" data-action="import-pdf" hidden></label>`;
+    if (!imp) {
+      return `
+        <div class="card">
+          <h2>Importer un relevé BNP Paribas</h2>
+          <p class="hint">Téléchargez votre relevé de compte (PDF) depuis mabanque.bnpparibas ou l'application
+          Mes Comptes, puis sélectionnez-le ici. Le fichier est analysé <b>sur cet appareil</b> : il n'est ni envoyé ni conservé.</p>
+          ${picker}
+        </div>
+        <div class="card">
+          <h2>Comment ça marche</h2>
+          <p class="hint">1. Les opérations sont lues et vérifiées avec le « Total des opérations » du relevé.<br>
+          2. Une catégorie est proposée pour chaque ligne ; les prélèvements sont marqués « fixes ».<br>
+          3. Vous corrigez si besoin et décochez ce que vous ne voulez pas compter (virements entre vos comptes…).<br>
+          4. Vos corrections sont retenues pour les prochains imports. Les lignes déjà importées sont ignorées.</p>
+        </div>
+        <button class="btn block" data-action="close-import">Retour</button>`;
+    }
+    if (imp.loading) return `<div class="card empty">Lecture de « ${esc(imp.fileName)} »…</div>`;
+    if (imp.error) {
+      return `<div class="card"><h2>Lecture impossible</h2><p class="hint neg">${esc(imp.error)}</p>${picker}</div>
+        <button class="btn block" data-action="close-import">Retour</button>`;
+    }
+
+    const st = imp.st;
+    const dups = imp.rows.filter((r) => r.duplicate).length;
+    const months = [...new Set(imp.rows.map((r) => r.op.month))].sort();
+    const manual = state.entries.filter((e) => !e.importKey && months.includes(e.month)).length;
+    const fmtD = (iso) => iso ? iso.slice(8, 10) + '/' + iso.slice(5, 7) + '/' + iso.slice(0, 4) : '?';
+    const catOptions = (type, current) => {
+      const list = categories(type);
+      if (!list.includes(current)) list.push(current);
+      return list.map((c) => `<option ${c === current ? 'selected' : ''}>${esc(c)}</option>`).join('');
+    };
+
+    const rowHtml = (r, i) => `
+      <li style="flex-wrap:wrap;${r.include ? '' : 'opacity:.55'}">
+        <input type="checkbox" data-imp="include" data-i="${i}" ${r.include ? 'checked' : ''} ${r.duplicate ? 'disabled' : ''}
+          style="width:22px;height:22px;accent-color:var(--accent)" aria-label="Importer cette ligne">
+        <div class="grow">
+          <div class="title">${esc(r.op.label)}</div>
+          <div class="meta">${fmtD(r.op.date).slice(0, 5)} · ${esc(r.op.detail || '')}${r.duplicate ? ' · <b>déjà importée</b>' : ''}${r.op.transfer === 'own' ? ' · entre vos comptes' : ''}${r.sug.learned ? ' · règle apprise' : ''}</div>
+        </div>
+        <div class="num ${r.op.type === 'income' ? 'pos' : ''}">${r.op.type === 'income' ? '+' : '−'}${eur(r.op.amount)}</div>
+        <div style="flex-basis:100%;display:flex;gap:8px;align-items:center;padding-left:32px">
+          <select data-imp="category" data-i="${i}" style="flex:1;min-height:36px;border-radius:8px;border:1px solid var(--border);background:var(--surface-2);padding:0 8px;font-size:14px">${catOptions(r.op.type, r.category)}</select>
+          <label class="check" style="min-height:36px;gap:6px;font-size:.85rem"><input type="checkbox" data-imp="recurring" data-i="${i}" ${r.recurring ? 'checked' : ''} style="width:18px;height:18px">fixe</label>
+        </div>
+      </li>`;
+
+    return `
+      <div class="card">
+        <h2>${esc(st.bank)} · ${st.period ? `du ${fmtD(st.period.from)} au ${fmtD(st.period.to)}` : esc(imp.fileName)}</h2>
+        <div class="kv"><span>Opérations lues</span><span class="num">${st.operations.length}</span></div>
+        <div class="kv"><span>Débits / crédits</span><span class="num">−${eur(st.check.debit)} / +${eur(st.check.credit)}</span></div>
+        ${st.openingBalance != null ? `<div class="kv"><span>Solde début → fin</span><span class="num">${eur(st.openingBalance)} → ${eur(st.closingBalance)}</span></div>` : ''}
+        <div class="verdict">${st.check.ok
+    ? '<strong class="pos">✓ Montants vérifiés</strong>Les totaux correspondent exactement au « Total des opérations » du relevé.'
+    : '<strong class="neg">⚠ Vérification incomplète</strong>' + st.warnings.map(esc).join('<br>')}</div>
+        ${dups ? `<p class="hint">${dups} opération(s) déjà importée(s) précédemment : ignorée(s).</p>` : ''}
+        ${manual ? `<p class="hint">⚠ ${manual} ligne(s) saisie(s) à la main existent déjà sur ${months.map(monthShort).join(', ')}. Supprimez-les ensuite si elles font doublon (ex. loyer).</p>` : ''}
+        <p class="hint">Un relevé couvre souvent deux mois partiels : importez aussi le relevé suivant pour compléter.</p>
+      </div>
+
+      <div class="row">
+        <button class="btn small" data-action="imp-all" data-v="1">Tout cocher</button>
+        <button class="btn small" data-action="imp-all" data-v="0">Tout décocher</button>
+        <button class="btn small" data-action="close-import">Annuler</button>
+      </div>
+
+      ${months.map((m) => `
+        <div class="card">
+          <h2 style="text-transform:capitalize">${monthLabel(m)}</h2>
+          <ul class="list">${imp.rows.map((r, i) => (r.op.month === m ? rowHtml(r, i) : '')).join('')}</ul>
+        </div>`).join('')}
+
+      <div style="position:sticky;bottom:calc(76px + var(--safe-b));padding-top:6px">
+        <button class="btn primary block" data-action="imp-confirm" id="imp-confirm" style="box-shadow:0 6px 18px rgba(0,0,0,.22)">${importFooter()}</button>
+      </div>`;
+  }
+
+  function confirmImport() {
+    const imp = ui.imp;
+    const now = Date.now().toString(36);
+    let added = 0;
+    imp.rows.forEach((r) => {
+      const op = r.op;
+      // Apprentissage : on retient le choix de l'utilisateur s'il diffère de la proposition.
+      // Pas pour les virements émis : un même bénéficiaire reçoit des virements pour des motifs variés.
+      const changed = r.category !== r.sug.category || r.recurring !== r.sug.recurring || (!r.duplicate && r.include === r.sug.ignore);
+      if (changed && !r.duplicate && op.kind !== 'vir-out') {
+        state.importRules[op.key] = { category: r.category, recurring: r.recurring, ignore: !r.include };
+      }
+      if (!r.include || r.duplicate) return;
+      state.entries.push({
+        id: uid(), month: op.month, date: op.date, type: op.type, label: op.label, category: r.category,
+        amount: op.amount, recurring: r.recurring, importKey: op.importKey, source: 'bnp-pdf', batch: now,
+      });
+      added++;
+    });
+    save();
+    const months = imp.rows.filter((r) => r.include).map((r) => r.op.month).sort();
+    ui.imp = null;
+    ui.tab = 'month';
+    if (months.length) ui.month = months[months.length - 1];
+    render(); window.scrollTo(0, 0);
+    toast(`${added} opération(s) importée(s)`);
+  }
+
   // ---------------------------------------------------------------- vue : Réglages
 
   function viewSettings() {
@@ -547,6 +714,15 @@
           <label class="btn">Importer<input type="file" accept="application/json,.json" data-action="import" hidden></label>
         </div>
         <p class="hint">${state.entries.length} ligne(s) saisie(s) · ${state.planned.length} charge(s) programmée(s).</p>
+      </div>
+      <div class="card">
+        <h2>Import de relevés</h2>
+        <p class="hint">Relevés de compte BNP Paribas (PDF). Le fichier est lu sur cet appareil et n'est jamais envoyé.
+        ${Object.keys(state.importRules || {}).length} règle(s) de catégorisation apprise(s).</p>
+        <div class="row">
+          <button class="btn" data-action="open-import">Importer un relevé</button>
+          ${Object.keys(state.importRules || {}).length ? '<button class="btn danger" data-action="reset-rules">Oublier les règles</button>' : ''}
+        </div>
       </div>
       <div class="card">
         <h2>Données</h2>
@@ -749,6 +925,11 @@
       state.planned = state.planned.filter((x) => x !== p);
       save(); render(); toast('Ajoutée aux dépenses du mois');
     },
+    'open-import': () => { ui.tab = 'import'; ui.imp = null; render(); window.scrollTo(0, 0); },
+    'close-import': () => { ui.imp = null; ui.tab = 'month'; render(); window.scrollTo(0, 0); },
+    'imp-all': (el) => { ui.imp.rows.forEach((r) => { if (!r.duplicate) r.include = el.dataset.v === '1'; }); render(); },
+    'imp-confirm': confirmImport,
+    'reset-rules': () => { if (confirm('Oublier toutes les règles de catégorisation apprises ?')) { state.importRules = {}; save(); render(); } },
     'toggle-variable': (el) => { state.settings.includeVariable = el.checked; save(); render(); },
     'tax-couple': (el) => {
       T().couple = el.dataset.v === '1';
@@ -804,6 +985,15 @@
       }).catch((e) => toast('Import impossible : ' + e.message));
     }
     if (el.dataset.bind && (el.tagName === 'SELECT' || el.type === 'checkbox')) bindInput(el);
+    if (el.dataset.action === 'import-pdf' && el.files[0]) readStatement(el.files[0]);
+    if (el.dataset.imp && ui.imp && ui.imp.rows) {
+      const r = ui.imp.rows[Number(el.dataset.i)];
+      if (el.dataset.imp === 'include') { r.include = el.checked; el.closest('li').style.opacity = el.checked ? '' : '.55'; }
+      if (el.dataset.imp === 'recurring') r.recurring = el.checked;
+      if (el.dataset.imp === 'category') r.category = el.value;
+      const btn = document.getElementById('imp-confirm');
+      if (btn) btn.textContent = importFooter();
+    }
   });
   document.addEventListener('input', (ev) => {
     if (ev.target.dataset.bind && ev.target.type !== 'checkbox' && ev.target.tagName !== 'SELECT') bindInput(ev.target);
@@ -827,13 +1017,15 @@
     forecast: ['Prévisions', viewForecast],
     tax: ['Impôts', viewTax],
     settings: ['Réglages', viewSettings],
+    import: ['Importer un relevé', viewImport],
   };
   function render() {
     hideTip();
     const [title, fn] = VIEWS[ui.tab];
     document.getElementById('view-title').textContent = title;
     document.getElementById('view').innerHTML = fn();
-    document.querySelectorAll('.tabbar button').forEach((b) => b.classList.toggle('active', b.dataset.tab === ui.tab));
+    const tabFor = ui.tab === 'import' ? 'month' : ui.tab;
+    document.querySelectorAll('.tabbar button').forEach((b) => b.classList.toggle('active', b.dataset.tab === tabFor));
   }
   document.querySelectorAll('.tabbar button').forEach((b) => b.addEventListener('click', () => {
     ui.tab = b.dataset.tab;

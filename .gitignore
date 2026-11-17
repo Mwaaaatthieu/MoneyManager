@@ -1,0 +1,6 @@
+# Relevés bancaires et données personnelles : ne jamais les versionner
+*.pdf
+*.PDF
+releves/
+moneymanager-*.json
+node_modules/
