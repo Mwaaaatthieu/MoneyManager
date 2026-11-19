@@ -28,7 +28,7 @@
     };
   }
   function defaultState() {
-    return { version: 1, entries: [], planned: [], importRules: {}, settings: { includeVariable: true, theme: 'auto', trendExclude: { expense: [], income: [] } }, tax: defaultTax() };
+    return { version: 1, entries: [], planned: [], importRules: {}, settings: { includeVariable: true, theme: 'auto', trendExclude: { expense: [], income: ['Virement depuis épargne'] }, trendDefaultsV2: true }, tax: defaultTax() };
   }
   function load() {
     try {
@@ -36,9 +36,18 @@
       if (!raw) return defaultState();
       const s = JSON.parse(raw);
       const d = defaultState();
+      const settings = { ...d.settings, ...(s.settings || {}) };
+      // Migration (v1.4) : l'épargne n'est plus détectée par le libellé mais par une catégorie ignorée par défaut.
+      if (!(s.settings && s.settings.trendDefaultsV2)) {
+        const t = settings.trendExclude || { expense: [], income: [] };
+        t.income = t.income || [];
+        if (!t.income.includes('Virement depuis épargne')) t.income.push('Virement depuis épargne');
+        settings.trendExclude = t;
+        settings.trendDefaultsV2 = true;
+      }
       return {
         ...d, ...s,
-        settings: { ...d.settings, ...(s.settings || {}) },
+        settings,
         tax: { ...d.tax, ...(s.tax || {}), params: { ...d.tax.params, ...((s.tax || {}).params || {}) } },
       };
     } catch (e) {
@@ -242,7 +251,7 @@
       <div class="card">
         <h2>Répartition des dépenses</h2>
         <ul class="list">${cats.map(([c, v]) => `
-          <li><div class="grow"><div class="kv" style="padding:0"><span>${esc(c)}</span><span class="num">${eur0(v)} · ${pct(v / s.expense, 0)}</span></div>
+          <li class="tap" data-action="open-category" data-cat="${esc(c)}" data-year="${m.slice(0, 4)}"><div class="grow"><div class="kv" style="padding:0"><span>${esc(c)}</span><span class="num">${eur0(v)} · ${pct(v / s.expense, 0)} ›</span></div>
           <div class="bar-h" style="width:${Math.max(2, (v / maxCat) * 100)}%"></div></div></li>`).join('')}</ul>
       </div>` : ''}
 
@@ -269,12 +278,13 @@
     const p = C.predictMonth(state, cur, m, { exclude: ex });
     const title = m === cur ? 'Prévision du mois en cours' : 'Prévision du mois prochain';
     if (!p.window.length) {
-      return `<div class="card"><h2>🔮 ${title}</h2><p class="hint">Pas encore d'historique : saisissez ou importez au moins un mois passé pour obtenir une prédiction.</p></div>`;
+      return `<div class="card"><h2>🔮 ${title}</h2><p class="hint">Pas encore assez d'historique : la prédiction utilise les mois antérieurs à ${monthLabel(p.skippedMonth)}
+        (ce dernier est ignoré car il peut être incomplet). Saisissez ou importez des mois plus anciens.</p></div>`;
     }
     const nEx = ex.expense.length + ex.income.length;
     const basis = `Basé sur ${p.window.length} mois (${p.window.map(monthShort).join(', ')}) : charges fixes au dernier montant connu,
       variables en moyenne pondérée (les mois récents comptent davantage)${p.plannedItems.length ? ', + charges programmées' : ''}.
-      Virements depuis l'épargne exclus des revenus${nEx ? ` · ${nEx} catégorie(s) ignorée(s)` : ''}.`;
+      ${monthLabel(p.skippedMonth)} est ignoré (peut-être incomplet)${nEx ? ` · ${nEx} catégorie(s) ignorée(s)` : ''}.`;
     const cats = Object.entries(p.expense.byCategory).sort((a, b) => b[1] - a[1]);
 
     let body;
@@ -320,56 +330,200 @@
 
   // ---------------------------------------------------------------- vue : Bilan
 
+  function historyHidden() { return state.settings.historyHidden || []; }
+
+  /** Catégories de dépenses utilisées, triées par montant sur les 12 derniers mois. */
+  function expenseCategoriesByTotal() {
+    const since = C.addMonths(C.monthKey(), -11);
+    const tot = {};
+    state.entries.filter((e) => e.type === 'expense').forEach((e) => {
+      const c = e.category || 'Autre';
+      if (!(c in tot)) tot[c] = 0;
+      if (e.month >= since) tot[c] += e.amount;
+    });
+    historyHidden().forEach((c) => { if (!(c in tot)) tot[c] = 0; });
+    return Object.entries(tot).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  }
+
   function viewHistory() {
     const cur = C.monthKey();
     const months = [];
     for (let i = 11; i >= 0; i--) months.push(C.addMonths(cur, -i));
-    const rows = months.map((m) => C.monthSummary(state.entries, m));
-    const withData = rows.filter((r) => r.count > 0);
-    const win = C.referenceWindow(state.entries, cur, 6);
-    const avg = C.averages(state.entries, win);
-    const avgInc = avg.recIncome + avg.varIncome;
-    const avgExp = avg.recExpense + avg.varExpense;
-
-    // catégories moyennes sur la fenêtre
-    const catTotals = {};
-    state.entries.filter((e) => e.type === 'expense' && win.includes(e.month))
-      .forEach((e) => { catTotals[e.category] = (catTotals[e.category] || 0) + e.amount; });
-    const cats = Object.entries(catTotals).map(([c, v]) => [c, v / (win.length || 1)]).sort((a, b) => b[1] - a[1]);
-
-    if (!withData.length) {
+    if (!state.entries.length) {
       return `<div class="card empty">Pas encore de données. Saisissez vos revenus et dépenses dans l'onglet « Mois »,
         ou chargez des données d'exemple depuis « Réglages ».</div>`;
     }
 
-    const chart = barChart('hist', rows, [
-      { key: 'income', cls: 'b-inc', label: 'Revenus' },
-      { key: 'expense', cls: 'b-exp', label: 'Dépenses' },
-    ], (r) => `<b>${monthLabel(r.month)}</b>${tipRow('income', 'Revenus', eur0(r.income))}${tipRow('expense', 'Dépenses', eur0(r.expense))}${tipRow('', 'Solde', `<span class="${cls(r.balance)}">${signed(Math.round(r.balance))}</span>`)}`,
-    { label: 'Revenus et dépenses des 12 derniers mois' });
+    // Filtre de catégories (dépenses) : les catégories masquées sont retirées de tous les chiffres de la page.
+    const hidden = new Set(historyHidden());
+    const allCats = expenseCategoriesByTotal();
+    const shownCats = allCats.filter(([c]) => !hidden.has(c));
+    const filtered = hidden.size > 0;
+    const entries = state.entries.filter((e) => e.type === 'income' || !hidden.has(e.category || 'Autre'));
 
-    return `
-      <p class="hint">Moyennes calculées sur ${win.length} mois : ${win.map(monthShort).join(', ') || '—'} (mois en cours exclu).</p>
+    const rows = months.map((m) => C.monthSummary(entries, m));
+    const win = C.referenceWindow(state.entries, cur, 6);
+    const avg = C.averages(entries, win);
+    const avgInc = avg.recIncome + avg.varIncome;
+    const avgExp = avg.recExpense + avg.varExpense;
+
+    const catTotals = {};
+    entries.filter((e) => e.type === 'expense' && win.includes(e.month))
+      .forEach((e) => { const c = e.category || 'Autre'; catTotals[c] = (catTotals[c] || 0) + e.amount; });
+    const cats = Object.entries(catTotals).map(([c, v]) => [c, v / (win.length || 1)]).sort((a, b) => b[1] - a[1]);
+
+    const filterLabel = !filtered ? 'toutes'
+      : shownCats.length === 1 ? esc(shownCats[0][0])
+        : `${shownCats.length} sur ${allCats.length}`;
+    const filterBar = `
+      <div class="row" style="align-items:center;margin:4px 0 10px">
+        <button class="btn small" data-action="hist-filter" aria-haspopup="dialog">Catégories : <b>${filterLabel}</b> ▾</button>
+        ${filtered ? '<button class="btn small" data-action="hist-filter-reset">Tout afficher</button>' : ''}
+      </div>`;
+
+    const series = filtered
+      ? [{ key: 'expense', cls: 'b-exp', label: 'Dépenses' }]
+      : [{ key: 'income', cls: 'b-inc', label: 'Revenus' }, { key: 'expense', cls: 'b-exp', label: 'Dépenses' }];
+    const chart = barChart('hist', rows, series, (r) => `<b>${monthLabel(r.month)}</b>${filtered ? ''
+      : tipRow('income', 'Revenus', eur0(r.income))}${tipRow('expense', filtered ? 'Dépenses filtrées' : 'Dépenses', eur0(r.expense))}${filtered ? ''
+      : tipRow('', 'Solde', `<span class="${cls(r.balance)}">${signed(Math.round(r.balance))}</span>`)}`,
+    { label: filtered ? 'Dépenses filtrées des 12 derniers mois' : 'Revenus et dépenses des 12 derniers mois' });
+
+    const stats = filtered ? `
+      <div class="stats">
+        <div class="stat wide"><div class="lbl"><i class="dot expense"></i>Dépenses moyennes · ${filterLabel}</div><div class="val num">${eur0(avgExp)}</div>
+          <div class="sub">fixes ${eur0(avg.recExpense)} · variables ${eur0(avg.varExpense)} · ${pct(avgInc > 0 ? avgExp / avgInc : null, 0)} des revenus moyens</div></div>
+      </div>` : `
       <div class="stats">
         <div class="stat"><div class="lbl"><i class="dot income"></i>Revenus moyens</div><div class="val num">${eur0(avgInc)}</div><div class="sub">dont fixes ${eur0(avg.recIncome)}</div></div>
         <div class="stat"><div class="lbl"><i class="dot expense"></i>Dépenses moyennes</div><div class="val num">${eur0(avgExp)}</div><div class="sub">fixes ${eur0(avg.recExpense)} · var. ${eur0(avg.varExpense)}</div></div>
         <div class="stat wide"><div class="lbl">Épargne moyenne / mois</div><div class="val num ${cls(avgInc - avgExp)}">${signed(Math.round(avgInc - avgExp))}</div>
           <div class="sub">Taux d'épargne moyen : ${pct(avgInc > 0 ? (avgInc - avgExp) / avgInc : null)} · « reste à vivre » après charges fixes : ${eur0(avg.recIncome - avg.recExpense)}</div></div>
-      </div>
+      </div>`;
+
+    return `
+      ${filterBar}
+      <p class="hint">Moyennes calculées sur ${win.length} mois : ${win.map(monthShort).join(', ') || '—'} (mois en cours exclu).</p>
+      ${stats}
 
       <div class="card">
         <h2>12 derniers mois</h2>
-        <div class="legend"><span><i class="dot income"></i>Revenus</span><span><i class="dot expense"></i>Dépenses</span></div>
+        ${filtered ? '' : '<div class="legend"><span><i class="dot income"></i>Revenus</span><span><i class="dot expense"></i>Dépenses</span></div>'}
         ${chart}
         <details><summary>Voir le tableau</summary>
-          <div class="scroll-x"><table class="data"><thead><tr><th>Mois</th><th>Revenus</th><th>Dépenses</th><th>Solde</th><th>Taux</th></tr></thead><tbody>
-          ${rows.slice().reverse().filter((r) => r.count).map((r) => `<tr><td>${monthLabel(r.month)}</td><td class="num">${eur0(r.income)}</td><td class="num">${eur0(r.expense)}</td><td class="num ${cls(r.balance)}">${signed(Math.round(r.balance))}</td><td class="num">${pct(r.savingsRate, 0)}</td></tr>`).join('')}
+          <div class="scroll-x"><table class="data"><thead><tr><th>Mois</th>${filtered ? '<th>Dépenses</th>' : '<th>Revenus</th><th>Dépenses</th><th>Solde</th><th>Taux</th>'}</tr></thead><tbody>
+          ${rows.slice().reverse().filter((r) => r.count).map((r) => `<tr><td>${monthLabel(r.month)}</td>${filtered ? `<td class="num">${eur0(r.expense)}</td>`
+    : `<td class="num">${eur0(r.income)}</td><td class="num">${eur0(r.expense)}</td><td class="num ${cls(r.balance)}">${signed(Math.round(r.balance))}</td><td class="num">${pct(r.savingsRate, 0)}</td>`}</tr>`).join('')}
           </tbody></table></div></details>
       </div>
 
-      ${cats.length ? `<div class="card"><h2>Dépenses moyennes par catégorie</h2>
-        <ul class="list">${cats.map(([c, v]) => `<li><div class="grow"><div class="kv" style="padding:0"><span>${esc(c)}</span><span class="num">${eur0(v)} / mois</span></div>
-        <div class="bar-h" style="width:${Math.max(2, (v / cats[0][1]) * 100)}%"></div></div></li>`).join('')}</ul></div>` : ''}`;
+      <div class="card"><h2>Dépenses moyennes par catégorie</h2>
+        ${cats.length ? `<p class="hint">Touchez une catégorie pour voir toutes ses dépenses de l'année.</p>
+        <ul class="list">${cats.map(([c, v]) => `<li class="tap" data-action="open-category" data-cat="${esc(c)}"><div class="grow"><div class="kv" style="padding:0"><span>${esc(c)}</span><span class="num">${eur0(v)} / mois ›</span></div>
+        <div class="bar-h" style="width:${Math.max(2, (v / cats[0][1]) * 100)}%"></div></div></li>`).join('')}</ul>`
+    : '<p class="hint">Aucune dépense sur la période pour les catégories affichées.</p>'}
+      </div>`;
+  }
+
+  function openHistoryFilter() {
+    const all = expenseCategoriesByTotal();
+    const hidden = new Set(historyHidden());
+    sheet().innerHTML = `
+      <form method="dialog">
+        <h2>Catégories affichées</h2>
+        <p class="hint">Décochez les catégories à retirer du bilan, ou touchez « seule » pour n'afficher qu'une catégorie.</p>
+        <div class="row" style="margin:8px 0">
+          <button type="button" class="btn small" data-hf="all">Tout cocher</button>
+          <button type="button" class="btn small" data-hf="none">Tout décocher</button>
+        </div>
+        <ul class="list" style="max-height:48vh;overflow:auto">${all.map(([c, v]) => `
+          <li><label class="check grow" style="min-height:40px"><input type="checkbox" value="${esc(c)}" ${hidden.has(c) ? '' : 'checked'}>
+            <span>${esc(c)}<br><span class="hint" style="margin:0">${eur0(v)} sur 12 mois</span></span></label>
+            <button type="button" class="btn small" data-hf-only="${esc(c)}">seule</button></li>`).join('')}</ul>
+        <p class="hint neg" id="hf-status"></p>
+        <div class="row" style="margin-top:8px">
+          <button type="button" class="btn" data-hf="cancel">Annuler</button>
+          <button type="button" class="btn primary" data-hf="apply">Appliquer</button>
+        </div>
+      </form>`;
+    const boxes = () => [...sheet().querySelectorAll('input[type=checkbox]')];
+    const apply = () => {
+      const unchecked = boxes().filter((b) => !b.checked).map((b) => b.value);
+      if (unchecked.length === boxes().length) { sheet().querySelector('#hf-status').textContent = 'Choisissez au moins une catégorie.'; return; }
+      state.settings.historyHidden = unchecked;
+      save(); sheet().close(); render();
+    };
+    sheet().querySelectorAll('[data-hf]').forEach((b) => b.addEventListener('click', () => {
+      const a = b.dataset.hf;
+      if (a === 'all' || a === 'none') boxes().forEach((x) => { x.checked = a === 'all'; });
+      if (a === 'cancel') sheet().close();
+      if (a === 'apply') apply();
+    }));
+    sheet().querySelectorAll('[data-hf-only]').forEach((b) => b.addEventListener('click', () => {
+      boxes().forEach((x) => { x.checked = x.value === b.dataset.hfOnly; });
+      apply();
+    }));
+    sheet().showModal();
+  }
+
+  // ---------------------------------------------------------------- vue : détail d'une catégorie
+
+  function viewCategory() {
+    const { name, year } = ui.cat;
+    const cur = C.monthKey();
+    const curYear = Number(cur.slice(0, 4));
+    const months = [];
+    for (let m = 1; m <= 12; m++) months.push(`${year}-${String(m).padStart(2, '0')}`);
+    const inCat = (e) => e.type === 'expense' && (e.category || 'Autre') === name;
+    const list = state.entries.filter((e) => inCat(e) && e.month.startsWith(year + '-'));
+    const rows = months.map((m) => ({ month: m, amount: C.round2(list.filter((e) => e.month === m).reduce((a, e) => a + e.amount, 0)) }));
+    const total = list.reduce((a, e) => a + e.amount, 0);
+    const allExp = state.entries.filter((e) => e.type === 'expense' && e.month.startsWith(year + '-')).reduce((a, e) => a + e.amount, 0);
+    // Moyenne sur les mois couverts par vos données cette année (du premier mois saisi au mois en cours / décembre).
+    const yearMonths = state.entries.map((e) => e.month).filter((m) => m.startsWith(year + '-')).sort();
+    const firstM = yearMonths.length ? Number(yearMonths[0].slice(5, 7)) : 1;
+    const lastM = year === curYear ? Number(cur.slice(5, 7)) : 12;
+    const elapsed = Math.max(1, lastM - firstM + 1);
+    const hasPrev = state.entries.some((e) => inCat(e) && e.month < `${year}-01`);
+    const hasNext = year < curYear || state.entries.some((e) => inCat(e) && e.month > `${year}-12`);
+
+    const chart = barChart('cat', rows, [{ key: 'amount', cls: 'b-exp', label: name }],
+      (r) => `<b>${monthLabel(r.month)}</b>${tipRow('expense', esc(name), eur(r.amount))}`, { label: `Dépenses ${name} par mois en ${year}` });
+
+    const byMonth = months.slice().reverse().filter((m) => rows.find((r) => r.month === m).amount > 0);
+    return `
+      <div class="row" style="align-items:center;justify-content:space-between">
+        <button class="btn small" data-action="cat-back">‹ Bilan</button>
+        <div class="monthnav" style="gap:6px;margin:0">
+          <button class="iconbtn" data-action="cat-year" data-d="-1" aria-label="Année précédente" ${hasPrev ? '' : 'disabled style="opacity:.35"'}>‹</button>
+          <strong>${year}</strong>
+          <button class="iconbtn" data-action="cat-year" data-d="1" aria-label="Année suivante" ${hasNext ? '' : 'disabled style="opacity:.35"'}>›</button>
+        </div>
+      </div>
+
+      <div class="stats" style="margin-top:12px">
+        <div class="stat"><div class="lbl"><i class="dot expense"></i>Total ${year}</div><div class="val num">${eur0(total)}</div>
+          <div class="sub">${list.length} opération(s)</div></div>
+        <div class="stat"><div class="lbl">Moyenne / mois</div><div class="val num">${eur0(total / elapsed)}</div>
+          <div class="sub">sur ${elapsed} mois · ${pct(allExp > 0 ? total / allExp : null, 0)} des dépenses</div></div>
+      </div>
+
+      <div class="card">
+        <h2>Par mois</h2>
+        ${chart}
+      </div>
+
+      ${byMonth.length ? byMonth.map((m) => {
+    const items = list.filter((e) => e.month === m).sort((a, b) => (b.date || '').localeCompare(a.date || '') || b.amount - a.amount);
+    return `<div class="card">
+          <div class="kv" style="padding:0 0 4px"><h2 style="margin:0;text-transform:capitalize">${monthLabel(m)}</h2><span class="num"><b>${eur(rows.find((r) => r.month === m).amount)}</b></span></div>
+          <ul class="list">${items.map((e) => `
+            <li class="tap" data-action="edit-entry" data-id="${e.id}"><div class="grow">
+              <div class="title">${esc(e.label)}${e.recurring ? '<span class="tag">fixe</span>' : ''}</div>
+              <div class="meta">${e.date ? e.date.slice(8, 10) + '/' + e.date.slice(5, 7) : monthShort(e.month)}</div></div>
+              <span class="num">−${eur(e.amount)}</span></li>`).join('')}</ul>
+        </div>`;
+  }).join('') : `<div class="card empty">Aucune dépense « ${esc(name)} » en ${year}.</div>`}`;
   }
 
   // ---------------------------------------------------------------- vue : Prévisions
@@ -391,7 +545,7 @@
 
     return `
       ${noData ? '<div class="card hint">Aucun historique : la prévision ne repose que sur les charges programmées. Saisissez quelques mois pour une estimation réaliste.</div>'
-    : `<p class="hint">Projection basée sur ${f.window.length} mois (${f.window.map(monthShort).join(', ')}) : fixes au dernier montant, variables en moyenne pondérée, + charges programmées. Virements depuis l'épargne et catégories ignorées exclus (<a href="#" data-action="goto-trend-settings">régler</a>).</p>`}
+    : `<p class="hint">Projection basée sur ${f.window.length} mois (${f.window.map(monthShort).join(', ')}) : fixes au dernier montant, variables en moyenne pondérée, + charges programmées. ${monthLabel(C.addMonths(cur, -1))} ignoré (peut-être incomplet) ; catégories ignorées exclues (<a href="#" data-action="goto-trend-settings">régler</a>).</p>`}
       <label class="check card" style="margin-top:8px"><input type="checkbox" data-action="toggle-variable" ${inc ? 'checked' : ''}>
         <span>Inclure les dépenses <b>variables</b> (${eur0(f.averages.varExpense)}/mois)<br><span class="hint">Recommandé : sinon seules les charges fixes sont prises en compte.</span></span></label>
 
@@ -967,7 +1121,7 @@
 
   function trendSettingsCard() {
     const ex = trendExclude();
-    const win = C.referenceWindow(state.entries, C.monthKey(), 6);
+    const win = C.predictionWindow(state.entries, C.monthKey());
     const avgBy = (type) => {
       const out = {};
       state.entries.filter((e) => e.type === type && win.includes(e.month))
@@ -978,7 +1132,7 @@
       const avg = avgBy(type);
       const used = new Set(state.entries.filter((e) => e.type === type).map((e) => e.category).filter(Boolean));
       ex[type].forEach((c) => used.add(c));
-      if (type === 'income') used.delete(C.SAVINGS_CATEGORY);
+      if (type === 'income') DEFAULT_CATS.income.forEach((c) => used.add(c));
       const list = [...used].sort((a, b) => (avg[b] || 0) - (avg[a] || 0) || a.localeCompare(b));
       if (!list.length) return '<p class="hint">Aucune catégorie utilisée pour l\'instant.</p>';
       return list.map((c) => `
@@ -991,12 +1145,13 @@
       <div class="card" id="trend-settings">
         <h2>Prédictions</h2>
         <p class="hint">Cochez les catégories à <b>ignorer</b> dans le calcul des tendances (dépenses exceptionnelles, remboursements entre proches…).
-        Elles restent visibles dans vos mois et votre bilan.</p>
+        Elles restent visibles dans vos mois et votre bilan. Moyennes calculées sur ${win.length ? win.map(monthShort).join(', ') : '—'}
+        (le mois précédent est ignoré car il peut être incomplet).</p>
         <h3>Dépenses ignorées</h3>
         ${rows('expense')}
         <h3>Revenus ignorés</h3>
-        <label class="check"><input type="checkbox" checked disabled><span>${esc(C.SAVINGS_CATEGORY)}<br>
-          <span class="hint">Toujours ignorés : virements venant de votre Livret A ou de votre épargne (catégorie ci-dessus, ou libellé contenant « livret », « LDDS », « LEP » ou « épargne »).</span></span></label>
+        <p class="hint">Par exemple « ${esc(C.SAVINGS_CATEGORY)} » pour les virements venant de votre Livret A :
+        classez-les dans cette catégorie (l'import des relevés le propose pour les virements reçus de vos propres comptes).</p>
         ${rows('income')}
       </div>`;
   }
@@ -1185,6 +1340,14 @@
     theme: (el) => { state.settings.theme = el.dataset.v; save(); applyTheme(); render(); },
     export: openExport,
     'paste-import': openPasteImport,
+    'hist-filter': openHistoryFilter,
+    'hist-filter-reset': () => { state.settings.historyHidden = []; save(); render(); },
+    'open-category': (el) => {
+      ui.cat = { name: el.dataset.cat, year: Number(el.dataset.year || C.monthKey().slice(0, 4)), from: ui.tab };
+      ui.tab = 'category'; render(); window.scrollTo(0, 0);
+    },
+    'cat-back': () => { ui.tab = (ui.cat && ui.cat.from) || 'history'; render(); window.scrollTo(0, 0); },
+    'cat-year': (el) => { ui.cat.year += Number(el.dataset.d); render(); },
     'goto-trend-settings': (el, ev) => {
       if (ev) ev.preventDefault();
       ui.tab = 'settings'; render();
@@ -1269,13 +1432,14 @@
     tax: ['Impôts', viewTax],
     settings: ['Réglages', viewSettings],
     import: ['Importer un relevé', viewImport],
+    category: ['Catégorie', viewCategory],
   };
   function render() {
     hideTip();
     const [title, fn] = VIEWS[ui.tab];
-    document.getElementById('view-title').textContent = title;
+    document.getElementById('view-title').textContent = ui.tab === 'category' ? ui.cat.name : title;
     document.getElementById('view').innerHTML = fn();
-    const tabFor = ui.tab === 'import' ? 'month' : ui.tab;
+    const tabFor = ui.tab === 'import' ? 'month' : ui.tab === 'category' ? (ui.cat.from || 'history') : ui.tab;
     document.querySelectorAll('.tabbar button').forEach((b) => b.classList.toggle('active', b.dataset.tab === tabFor));
   }
   document.querySelectorAll('.tabbar button').forEach((b) => b.addEventListener('click', () => {

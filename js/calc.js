@@ -86,28 +86,38 @@
 
   // ---------- Tendances et prédiction ----------
 
-  /** Virements venant de l'épargne (Livret A, LDDS, LEP…) : ce ne sont pas des revenus. */
-  const SAVINGS_RE = /livret|\bldds?\b|\blep\b|[ée]pargne/i;
+  /** Catégorie des virements venant de l'épargne (Livret A…) : ignorée par défaut dans les revenus prévus. */
   const SAVINGS_CATEGORY = 'Virement depuis épargne';
 
-  /** L'opération est-elle écartée du calcul des tendances ? exclude = { expense: [catégories], income: [catégories] } */
+  /**
+   * L'opération est-elle écartée du calcul des tendances ?
+   * Uniquement selon sa catégorie : exclude = { expense: [catégories], income: [catégories] }.
+   */
   function isTrendExcluded(e, exclude) {
     const list = (exclude && exclude[e.type]) || [];
-    if (list.includes(e.category)) return true;
-    return e.type === 'income' && SAVINGS_RE.test((e.label || '') + ' ' + (e.category || ''));
+    return list.includes(e.category);
   }
 
   /**
-   * Prédit les revenus et dépenses du mois `target` à partir de l'historique antérieur à `current`.
+   * Mois de référence des prédictions : les 6 mois qui précèdent le mois PRÉCÉDENT celui en cours
+   * (le mois précédent est ignoré car il peut être incomplet, ex. relevé pas encore importé).
+   */
+  function predictionWindow(entries, current) {
+    return referenceWindow(entries, addMonths(current, -1), 6);
+  }
+
+  /**
+   * Prédit les revenus et dépenses du mois `target` à partir des 6 mois qui précèdent le mois
+   * précédant `current` (voir predictionWindow).
    * - lignes fixes : dernier montant connu (si vues dans les 2 derniers mois de référence) ;
    * - lignes variables : moyenne par catégorie sur ≤ 6 mois, pondérée (le mois le plus récent compte le plus) ;
-   * - + charges/revenus programmés du mois cible ; catégories exclues et virements d'épargne écartés.
+   * - + charges/revenus programmés du mois cible ; catégories exclues écartées.
    */
   function predictMonth(state, current, target, options) {
     options = options || {};
     const exclude = options.exclude || {};
     const entries = state.entries || [];
-    const win = referenceWindow(entries, current, 6);
+    const win = predictionWindow(entries, current);
     const inWin = new Set(win);
     const used = entries.filter((e) => inWin.has(e.month));
     const kept = used.filter((e) => !isTrendExcluded(e, exclude));
@@ -154,6 +164,7 @@
     return {
       month: target,
       window: win,
+      skippedMonth: addMonths(current, -1),
       income,
       expense,
       balance: round2(income.total - expense.total),
@@ -383,7 +394,7 @@
   const Calc = {
     monthKey, addMonths, monthsBetween, round2,
     monthSummary, referenceWindow, averages, forecast, provisions,
-    predictMonth, isTrendExcluded, SAVINGS_CATEGORY,
+    predictMonth, predictionWindow, isTrendExcluded, SAVINGS_CATEGORY,
     DEFAULT_TAX_PARAMS, BAREME_KM, kmAllowance, abattement10, fraisReels,
     baremeImpot, impotRevenu, simulateTax,
   };

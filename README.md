@@ -5,12 +5,15 @@ Application web installable sur téléphone (PWA) pour réduire la charge mental
 - **Mois** — saisie manuelle des revenus et dépenses, marquées *fixes* (récurrentes) ou *variables*.
   Un bouton reprend en un geste les lignes fixes du mois précédent. Solde, taux d'épargne, répartition par catégorie.
 - **Bilan** — 12 derniers mois en graphique + tableau, moyennes sur 6 mois (revenus, charges fixes / variables,
-  épargne, « reste à vivre »), dépenses moyennes par catégorie.
+  épargne, « reste à vivre »), dépenses moyennes par catégorie. Filtre de catégories (n'en afficher qu'une, ou en
+  retirer plusieurs). Toucher une catégorie ouvre toutes ses dépenses de l'année (total, moyenne, graphique par mois,
+  détail des opérations, navigation d'une année à l'autre).
 - **Prédiction du mois en cours et du mois suivant** (onglet Mois) — revenus et dépenses prévus :
   lignes fixes au dernier montant connu, lignes variables en moyenne pondérée sur 6 mois (les mois récents comptent
-  davantage), + charges programmées. Pour le mois en cours : réalisé vs prévu, solde estimé en fin de mois et charges
-  fixes pas encore passées. Les catégories à ignorer se règlent dans Réglages › Prédictions ; les virements venant
-  du Livret A / de l'épargne ne sont jamais comptés comme revenus.
+  davantage), + charges programmées. Les 6 mois de référence s'arrêtent avant le mois précédent, ignoré car
+  il peut être incomplet. Pour le mois en cours : réalisé vs prévu, solde estimé en fin de mois et charges
+  fixes pas encore passées. Les catégories de dépenses et de revenus à ignorer se règlent dans Réglages › Prédictions
+  (« Virement depuis épargne », pour le Livret A, est ignorée par défaut).
 - **Prévisions** — projection sur 12 mois = moyenne des 6 derniers mois saisis + charges programmées
   (régularisation d'impôt, taxe foncière, assurance annuelle…, ponctuelles ou répétées).
   Calcule aussi le montant à mettre de côté chaque mois pour couvrir ces échéances.
