@@ -92,3 +92,57 @@ test('simulation : frais réels plus avantageux et régularisation', () => {
   assert.ok(sim.regularisation > 0 === (sim.impot > 1500));
   assert.ok(sim.tauxIdealArrondi >= sim.impot / 30000 * 100);
 });
+
+// ---------- prédiction mensuelle (tendances) ----------
+function history() {
+  const e = [];
+  const add = (month, type, label, category, amount, recurring) => e.push({ month, type, label, category, amount, recurring });
+  // 6 mois : mai → octobre 2026 ; mois courant = novembre
+  ['2026-05', '2026-06', '2026-07', '2026-08', '2026-09', '2026-10'].forEach((m, i) => {
+    add(m, 'income', 'Salaire', 'Salaire', 3000, true);
+    add(m, 'expense', 'Loyer', 'Logement', i < 5 ? 800 : 850, true); // loyer augmenté en octobre
+    add(m, 'expense', 'Courses', 'Alimentation', 300 + i * 30, false); // tendance à la hausse : 300 → 450
+    add(m, 'expense', 'Vacances', 'Loisirs', i === 2 ? 1200 : 0, false);
+  });
+  add('2026-09', 'income', 'Virement depuis Livret A', 'Autre revenu', 1000, false);
+  add('2026-10', 'income', 'Virement de M. X', 'Virement depuis épargne', 500, false);
+  add('2026-10', 'income', 'Vente Vinted', 'Autre revenu', 60, false);
+  return e;
+}
+
+test('prédiction : lignes fixes au dernier montant connu', () => {
+  const p = C.predictMonth({ entries: history(), planned: [] }, '2026-11', '2026-11');
+  assert.equal(p.window.length, 6);
+  assert.equal(p.income.fixed, 3000);
+  assert.equal(p.expense.byCategory.Logement, 850);
+});
+
+test('prédiction : moyenne pondérée des variables (tendance)', () => {
+  const p = C.predictMonth({ entries: history(), planned: [] }, '2026-11', '2026-11');
+  // courses : Σ(i+1)(300+30i)/21 = 8400/21 = 400 > moyenne simple 375
+  assert.equal(p.expense.byCategory.Alimentation, 400);
+  // vacances de juillet (poids 3/21)
+  assert.equal(p.expense.byCategory.Loisirs, 171.43);
+});
+
+test('prédiction : virements depuis le Livret A / l\'épargne exclus des revenus', () => {
+  const p = C.predictMonth({ entries: history(), planned: [] }, '2026-11', '2026-11');
+  // seule la vente Vinted (60 € en octobre, poids 6/21) reste dans les revenus variables
+  assert.equal(p.income.variable, 17.14);
+  assert.equal(p.excluded.count, 2);
+});
+
+test('prédiction : catégories de dépenses exclues et charges programmées', () => {
+  const state = { entries: history(), planned: [{ month: '2026-12', type: 'expense', label: 'Taxe', category: 'Impôts & taxes', amount: 900 }] };
+  const p = C.predictMonth(state, '2026-11', '2026-12', { exclude: { expense: ['Loisirs'] } });
+  assert.equal(p.expense.byCategory.Loisirs, undefined);
+  assert.equal(p.expense.planned, 900);
+  assert.equal(p.expense.total, 850 + 400 + 900);
+  assert.equal(p.balance, C.round2(p.income.total - p.expense.total));
+});
+
+test('prévisions 12 mois : mêmes exclusions que la prédiction mensuelle', () => {
+  const f = C.forecast({ entries: history(), planned: [] }, '2026-11', 2, { includeVariable: true, exclude: { expense: ['Loisirs'] } });
+  const p = C.predictMonth({ entries: history(), planned: [] }, '2026-11', '2026-11', { exclude: { expense: ['Loisirs'] } });
+  assert.equal(f.rows[0].savings, p.balance);
+});

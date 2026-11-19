@@ -8,7 +8,7 @@
     expense: ['Logement', 'Alimentation', 'Transport', 'Énergie', 'Assurances', 'Abonnements', 'Santé',
       'Loisirs', 'Restaurants & sorties', 'Shopping', 'Enfants', 'Impôts & taxes', 'Crédit', 'Cadeaux',
       'Frais bancaires', 'Retraits d\'espèces', 'Virements', 'Compte joint', 'Virements internes', 'Autre'],
-    income: ['Salaire', 'Prime', 'Allocations', 'Remboursement', 'Revenus locatifs', 'Autre revenu'],
+    income: ['Salaire', 'Prime', 'Allocations', 'Remboursement', 'Revenus locatifs', 'Virement depuis épargne', 'Autre revenu'],
   };
 
   // ---------------------------------------------------------------- état
@@ -28,7 +28,7 @@
     };
   }
   function defaultState() {
-    return { version: 1, entries: [], planned: [], importRules: {}, settings: { includeVariable: true, theme: 'auto' }, tax: defaultTax() };
+    return { version: 1, entries: [], planned: [], importRules: {}, settings: { includeVariable: true, theme: 'auto', trendExclude: { expense: [], income: [] } }, tax: defaultTax() };
   }
   function load() {
     try {
@@ -205,6 +205,8 @@
           <div class="sub">Taux d'épargne : ${pct(s.savingsRate)}</div></div>
       </div>
 
+      ${predictionCard(m, s)}
+
       <div class="row" style="margin-top:10px">
         <button class="btn small" data-action="open-import">📄 Importer un relevé PDF</button>
         ${imported ? `<span class="hint" style="align-self:center">${imported} ligne(s) importée(s)</span>` : ''}
@@ -245,6 +247,75 @@
       </div>` : ''}
 
       <button class="fab" data-action="new-entry" aria-label="Ajouter une ligne">+</button>`;
+  }
+
+  // ---------------------------------------------------------------- prédiction (mois en cours / suivant)
+
+  function trendExclude() {
+    const t = state.settings.trendExclude || {};
+    return { expense: t.expense || [], income: t.income || [] };
+  }
+
+  function meter(done, total, type) {
+    const ratio = total > 0 ? Math.min(1, done / total) : (done > 0 ? 1 : 0);
+    return `<div class="meter" role="img" aria-label="${Math.round(ratio * 100)} %"><i class="${type}" style="width:${(ratio * 100).toFixed(1)}%"></i></div>`;
+  }
+
+  function predictionCard(m, actualSummary) {
+    const cur = C.monthKey();
+    const next = C.addMonths(cur, 1);
+    if (m !== cur && m !== next) return '';
+    const ex = trendExclude();
+    const p = C.predictMonth(state, cur, m, { exclude: ex });
+    const title = m === cur ? 'Prévision du mois en cours' : 'Prévision du mois prochain';
+    if (!p.window.length) {
+      return `<div class="card"><h2>🔮 ${title}</h2><p class="hint">Pas encore d'historique : saisissez ou importez au moins un mois passé pour obtenir une prédiction.</p></div>`;
+    }
+    const nEx = ex.expense.length + ex.income.length;
+    const basis = `Basé sur ${p.window.length} mois (${p.window.map(monthShort).join(', ')}) : charges fixes au dernier montant connu,
+      variables en moyenne pondérée (les mois récents comptent davantage)${p.plannedItems.length ? ', + charges programmées' : ''}.
+      Virements depuis l'épargne exclus des revenus${nEx ? ` · ${nEx} catégorie(s) ignorée(s)` : ''}.`;
+    const cats = Object.entries(p.expense.byCategory).sort((a, b) => b[1] - a[1]);
+
+    let body;
+    if (m === cur) {
+      // Réel du mois, avec les mêmes exclusions que la prédiction pour comparer ce qui est comparable.
+      const list = state.entries.filter((e) => e.month === m && !C.isTrendExcluded(e, ex));
+      const inc = list.filter((e) => e.type === 'income').reduce((a, e) => a + e.amount, 0);
+      const exp = list.filter((e) => e.type === 'expense').reduce((a, e) => a + e.amount, 0);
+      const restInc = Math.max(0, p.income.total - inc);
+      const restExp = Math.max(0, p.expense.total - exp);
+      const endBalance = inc + restInc - exp - restExp;
+      const seen = new Set(state.entries.filter((e) => e.month === m).map((e) => e.label.trim().toLowerCase()));
+      const pending = p.recurringLines.filter((l) => l.type === 'expense' && !seen.has(l.label.trim().toLowerCase()));
+      body = `
+        <div class="kv"><span><i class="dot income"></i> Revenus : ${eur0(inc)} perçus</span><span class="num">sur ${eur0(p.income.total)} prévus</span></div>
+        ${meter(inc, p.income.total, 'income')}
+        <div class="kv" style="margin-top:8px"><span><i class="dot expense"></i> Dépenses : ${eur0(exp)} réalisées</span><span class="num">sur ${eur0(p.expense.total)} prévues</span></div>
+        ${meter(exp, p.expense.total, 'expense')}
+        ${exp > p.expense.total ? `<p class="hint neg">Dépassement de ${eur0(exp - p.expense.total)} par rapport à la prévision.</p>` : ''}
+        <div class="kv total" style="margin-top:8px"><span>Solde estimé en fin de mois</span><span class="num ${cls(endBalance)}">${signed(Math.round(endBalance))}</span></div>
+        <p class="hint">Prévu initialement : ${signed(Math.round(p.balance))} · reste attendu : +${eur0(restInc)} / −${eur0(restExp)}</p>
+        ${pending.length ? `<h3>Charges fixes attendues, pas encore passées</h3>
+          <ul class="list">${pending.slice(0, 6).map((l) => `<li><div class="grow"><div class="title">${esc(l.label)}</div><div class="meta">${esc(l.category || '')}</div></div><span class="num">−${eur(l.amount)}</span></li>`).join('')}</ul>
+          ${pending.length > 6 ? `<p class="hint">… et ${pending.length - 6} autre(s).</p>` : ''}` : ''}`;
+    } else {
+      body = `
+        <div class="kv"><span><i class="dot income"></i> Revenus prévus</span><span class="num">${eur0(p.income.total)}</span></div>
+        <p class="hint" style="margin-top:0">fixes ${eur0(p.income.fixed)} · variables ${eur0(p.income.variable)}${p.income.planned ? ` · programmés ${eur0(p.income.planned)}` : ''}</p>
+        <div class="kv"><span><i class="dot expense"></i> Dépenses prévues</span><span class="num">${eur0(p.expense.total)}</span></div>
+        <p class="hint" style="margin-top:0">fixes ${eur0(p.expense.fixed)} · variables ${eur0(p.expense.variable)}${p.expense.planned ? ` · programmées ${eur0(p.expense.planned)}` : ''}</p>
+        <div class="kv total"><span>Épargne prévue</span><span class="num ${cls(p.balance)}">${signed(Math.round(p.balance))}</span></div>`;
+    }
+    return `
+      <div class="card">
+        <h2>🔮 ${title}</h2>
+        ${body}
+        ${cats.length ? `<details><summary>Dépenses prévues par catégorie</summary><ul class="list">${cats.map(([c, v]) => `
+          <li><div class="grow"><div class="kv" style="padding:0"><span>${esc(c)}</span><span class="num">${eur0(v)}</span></div>
+          <div class="bar-h" style="width:${Math.max(2, (v / cats[0][1]) * 100)}%"></div></div></li>`).join('')}</ul></details>` : ''}
+        <p class="hint">${basis} <a href="#" data-action="goto-trend-settings">Régler</a></p>
+      </div>`;
   }
 
   // ---------------------------------------------------------------- vue : Bilan
@@ -306,7 +377,7 @@
   function viewForecast() {
     const cur = C.monthKey();
     const inc = state.settings.includeVariable;
-    const f = C.forecast(state, cur, 12, { includeVariable: inc });
+    const f = C.forecast(state, cur, 12, { includeVariable: inc, exclude: trendExclude() });
     const prov = C.provisions(state.planned, cur);
     const total = f.rows[f.rows.length - 1].cumulative;
     const upcoming = state.planned.filter((p) => p.month >= cur).sort((a, b) => a.month.localeCompare(b.month));
@@ -320,9 +391,9 @@
 
     return `
       ${noData ? '<div class="card hint">Aucun historique : la prévision ne repose que sur les charges programmées. Saisissez quelques mois pour une estimation réaliste.</div>'
-    : `<p class="hint">Projection basée sur la moyenne de ${f.window.length} mois (${f.window.map(monthShort).join(', ')}) + vos charges programmées.</p>`}
+    : `<p class="hint">Projection basée sur ${f.window.length} mois (${f.window.map(monthShort).join(', ')}) : fixes au dernier montant, variables en moyenne pondérée, + charges programmées. Virements depuis l'épargne et catégories ignorées exclus (<a href="#" data-action="goto-trend-settings">régler</a>).</p>`}
       <label class="check card" style="margin-top:8px"><input type="checkbox" data-action="toggle-variable" ${inc ? 'checked' : ''}>
-        <span>Inclure la moyenne des dépenses <b>variables</b> (${eur0(f.averages.varExpense)}/mois)<br><span class="hint">Recommandé : sinon seules les charges fixes sont prises en compte.</span></span></label>
+        <span>Inclure les dépenses <b>variables</b> (${eur0(f.averages.varExpense)}/mois)<br><span class="hint">Recommandé : sinon seules les charges fixes sont prises en compte.</span></span></label>
 
       <div class="stats">
         <div class="stat"><div class="lbl">Épargne prévue ce mois</div><div class="val num ${cls(f.rows[0].savings)}">${signed(Math.round(f.rows[0].savings))}</div></div>
@@ -702,6 +773,7 @@
         <p class="hint" id="version-status" role="status">Vérification de la dernière version…</p>
         <div id="version-action"></div>
       </div>
+      ${trendSettingsCard()}
       <div class="card">
         <h2>Apparence</h2>
         <div class="seg">${[['auto', 'Auto'], ['light', 'Clair'], ['dark', 'Sombre']].map(([v, l]) => `<button data-action="theme" data-v="${v}" class="${th === v ? 'on' : ''}">${l}</button>`).join('')}</div>
@@ -891,6 +963,44 @@
     return { entries: e, planned };
   }
 
+  // ---------------------------------------------------------------- réglages des prédictions
+
+  function trendSettingsCard() {
+    const ex = trendExclude();
+    const win = C.referenceWindow(state.entries, C.monthKey(), 6);
+    const avgBy = (type) => {
+      const out = {};
+      state.entries.filter((e) => e.type === type && win.includes(e.month))
+        .forEach((e) => { out[e.category] = (out[e.category] || 0) + e.amount / (win.length || 1); });
+      return out;
+    };
+    const rows = (type) => {
+      const avg = avgBy(type);
+      const used = new Set(state.entries.filter((e) => e.type === type).map((e) => e.category).filter(Boolean));
+      ex[type].forEach((c) => used.add(c));
+      if (type === 'income') used.delete(C.SAVINGS_CATEGORY);
+      const list = [...used].sort((a, b) => (avg[b] || 0) - (avg[a] || 0) || a.localeCompare(b));
+      if (!list.length) return '<p class="hint">Aucune catégorie utilisée pour l\'instant.</p>';
+      return list.map((c) => `
+        <label class="check" style="justify-content:space-between">
+          <span style="display:flex;gap:10px;align-items:center"><input type="checkbox" data-trend-ex="${type}" value="${esc(c)}" ${ex[type].includes(c) ? 'checked' : ''}>${esc(c)}</span>
+          <span class="num hint" style="margin:0">${avg[c] ? eur0(avg[c]) + '/mois' : '—'}</span>
+        </label>`).join('');
+    };
+    return `
+      <div class="card" id="trend-settings">
+        <h2>Prédictions</h2>
+        <p class="hint">Cochez les catégories à <b>ignorer</b> dans le calcul des tendances (dépenses exceptionnelles, remboursements entre proches…).
+        Elles restent visibles dans vos mois et votre bilan.</p>
+        <h3>Dépenses ignorées</h3>
+        ${rows('expense')}
+        <h3>Revenus ignorés</h3>
+        <label class="check"><input type="checkbox" checked disabled><span>${esc(C.SAVINGS_CATEGORY)}<br>
+          <span class="hint">Toujours ignorés : virements venant de votre Livret A ou de votre épargne (catégorie ci-dessus, ou libellé contenant « livret », « LDDS », « LEP » ou « épargne »).</span></span></label>
+        ${rows('income')}
+      </div>`;
+  }
+
   // ---------------------------------------------------------------- version
 
   const APP_VERSION = window.APP_VERSION || '?';
@@ -1075,6 +1185,12 @@
     theme: (el) => { state.settings.theme = el.dataset.v; save(); applyTheme(); render(); },
     export: openExport,
     'paste-import': openPasteImport,
+    'goto-trend-settings': (el, ev) => {
+      if (ev) ev.preventDefault();
+      ui.tab = 'settings'; render();
+      const card = document.getElementById('trend-settings');
+      if (card) card.scrollIntoView({ block: 'start' });
+    },
     'update-app': updateApp,
     demo: () => {
       if ((state.entries.length || state.planned.length) && !confirm('Remplacer vos données actuelles par l\'exemple ?')) return;
@@ -1105,6 +1221,16 @@
   document.addEventListener('change', (ev) => {
     const el = ev.target;
     if (el.dataset.action === 'toggle-variable') handlers['toggle-variable'](el);
+    if (el.dataset.trendEx) {
+      const t = trendExclude();
+      const list = t[el.dataset.trendEx];
+      const i = list.indexOf(el.value);
+      if (el.checked && i < 0) list.push(el.value);
+      if (!el.checked && i >= 0) list.splice(i, 1);
+      state.settings.trendExclude = t;
+      save();
+      toast(el.checked ? `« ${el.value} » ignorée dans les prédictions` : `« ${el.value} » de nouveau prise en compte`);
+    }
     if (el.dataset.action === 'import' && el.files[0]) {
       el.files[0].text().then(restoreBackup).catch((e) => toast('Restauration impossible : ' + e.message))
         .finally(() => { el.value = ''; });

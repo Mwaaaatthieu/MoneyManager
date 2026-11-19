@@ -84,14 +84,100 @@
     };
   }
 
+  // ---------- Tendances et prédiction ----------
+
+  /** Virements venant de l'épargne (Livret A, LDDS, LEP…) : ce ne sont pas des revenus. */
+  const SAVINGS_RE = /livret|\bldds?\b|\blep\b|[ée]pargne/i;
+  const SAVINGS_CATEGORY = 'Virement depuis épargne';
+
+  /** L'opération est-elle écartée du calcul des tendances ? exclude = { expense: [catégories], income: [catégories] } */
+  function isTrendExcluded(e, exclude) {
+    const list = (exclude && exclude[e.type]) || [];
+    if (list.includes(e.category)) return true;
+    return e.type === 'income' && SAVINGS_RE.test((e.label || '') + ' ' + (e.category || ''));
+  }
+
   /**
-   * Projection sur `horizon` mois à partir de `current` (inclus).
-   * options.includeVariable : intègre la moyenne des dépenses/revenus ponctuels.
+   * Prédit les revenus et dépenses du mois `target` à partir de l'historique antérieur à `current`.
+   * - lignes fixes : dernier montant connu (si vues dans les 2 derniers mois de référence) ;
+   * - lignes variables : moyenne par catégorie sur ≤ 6 mois, pondérée (le mois le plus récent compte le plus) ;
+   * - + charges/revenus programmés du mois cible ; catégories exclues et virements d'épargne écartés.
+   */
+  function predictMonth(state, current, target, options) {
+    options = options || {};
+    const exclude = options.exclude || {};
+    const entries = state.entries || [];
+    const win = referenceWindow(entries, current, 6);
+    const inWin = new Set(win);
+    const used = entries.filter((e) => inWin.has(e.month));
+    const kept = used.filter((e) => !isTrendExcluded(e, exclude));
+    const excluded = used.filter((e) => isTrendExcluded(e, exclude));
+
+    // Lignes fixes : somme par (sens, libellé) et par mois, on garde le mois le plus récent.
+    const recent = new Set(win.slice(-2));
+    const recByKey = {};
+    kept.filter((e) => e.recurring && recent.has(e.month)).forEach((e) => {
+      const key = e.type + '|' + String(e.label || e.category || '').trim().toLowerCase();
+      const cur = recByKey[key];
+      if (!cur || e.month > cur.month) recByKey[key] = { type: e.type, label: e.label, category: e.category, amount: e.amount, month: e.month };
+      else if (e.month === cur.month) cur.amount += e.amount;
+    });
+    const recurringLines = Object.values(recByKey).map((l) => ({ ...l, amount: round2(l.amount) }))
+      .sort((a, b) => b.amount - a.amount);
+
+    // Lignes variables : moyenne pondérée par catégorie.
+    const weights = {};
+    win.forEach((m, i) => { weights[m] = i + 1; });
+    const totalWeight = sum(win.map((m) => weights[m]));
+    const variable = { income: {}, expense: {} };
+    kept.filter((e) => !e.recurring).forEach((e) => {
+      const bucket = variable[e.type];
+      const cat = e.category || 'Autre';
+      bucket[cat] = (bucket[cat] || 0) + (e.amount * weights[e.month]) / totalWeight;
+    });
+
+    const planned = (state.planned || []).filter((p) => p.month === target);
+    const side = (type) => {
+      const byCategory = {};
+      recurringLines.filter((l) => l.type === type).forEach((l) => { const c = l.category || 'Autre'; byCategory[c] = (byCategory[c] || 0) + l.amount; });
+      Object.entries(variable[type]).forEach(([c, v]) => { byCategory[c] = (byCategory[c] || 0) + v; });
+      const pl = planned.filter((p) => (p.type === 'income' ? 'income' : 'expense') === type);
+      pl.forEach((p) => { const c = p.category || 'Autre'; byCategory[c] = (byCategory[c] || 0) + p.amount; });
+      Object.keys(byCategory).forEach((c) => { byCategory[c] = round2(byCategory[c]); });
+      const fixed = round2(sum(recurringLines.filter((l) => l.type === type), (l) => l.amount));
+      const vari = round2(sum(Object.values(variable[type])));
+      const plannedSum = round2(sum(pl, (p) => p.amount));
+      return { fixed, variable: vari, planned: plannedSum, total: round2(fixed + vari + plannedSum), byCategory };
+    };
+    const income = side('income');
+    const expense = side('expense');
+    return {
+      month: target,
+      window: win,
+      income,
+      expense,
+      balance: round2(income.total - expense.total),
+      recurringLines,
+      plannedItems: planned,
+      excluded: {
+        count: excluded.length,
+        savingsIncome: round2(sum(excluded.filter((e) => e.type === 'income'), (e) => e.amount) / (win.length || 1)),
+        expense: round2(sum(excluded.filter((e) => e.type === 'expense'), (e) => e.amount) / (win.length || 1)),
+      },
+    };
+  }
+
+  /**
+   * Projection sur `horizon` mois à partir de `current` (inclus), avec la même méthode que predictMonth.
+   * options.includeVariable : intègre les dépenses/revenus variables ; options.exclude : catégories écartées.
    */
   function forecast(state, current, horizon, options) {
     options = options || {};
-    const win = referenceWindow(state.entries, current, 6);
-    const avg = averages(state.entries, win);
+    const base = predictMonth({ ...state, planned: [] }, current, current, options);
+    const avg = {
+      recIncome: base.income.fixed, varIncome: base.income.variable,
+      recExpense: base.expense.fixed, varExpense: base.expense.variable, months: base.window,
+    };
     const planned = state.planned || [];
     const rows = [];
     let cumulative = 0;
@@ -115,7 +201,7 @@
         cumulative: round2(cumulative),
       });
     }
-    return { window: win, averages: avg, rows };
+    return { window: base.window, averages: avg, rows };
   }
 
   /** Montant à mettre de côté chaque mois pour couvrir les charges programmées à venir. */
@@ -297,6 +383,7 @@
   const Calc = {
     monthKey, addMonths, monthsBetween, round2,
     monthSummary, referenceWindow, averages, forecast, provisions,
+    predictMonth, isTrendExcluded, SAVINGS_CATEGORY,
     DEFAULT_TAX_PARAMS, BAREME_KM, kmAllowance, abattement10, fraisReels,
     baremeImpot, impotRevenu, simulateTax,
   };

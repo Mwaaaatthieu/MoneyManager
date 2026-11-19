@@ -1,5 +1,5 @@
 // Version de l'application — À INCRÉMENTER à chaque mise en ligne.
 // Utilisée par l'écran Réglages et par le service worker (nom du cache hors connexion) :
 // changer ce numéro force les téléphones à télécharger la nouvelle version.
-self.APP_VERSION = '1.2.0';
-self.APP_VERSION_DATE = '2026-11-17';
+self.APP_VERSION = '1.3.0';
+self.APP_VERSION_DATE = '2026-11-19';

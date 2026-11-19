@@ -137,3 +137,25 @@ test('un PDF qui n\'est pas un relevé est signalé', () => {
   assert.equal(r.operations.length, 0);
   assert.ok(r.warnings.length > 0);
 });
+
+test('virement reçu de son propre compte (Livret A) : importé comme « Virement depuis épargne »', () => {
+  const extra = [
+    ...header(729),
+    ...op(711, '10.01', 'VIR CPTE A CPTE RECU /DE MME DUPONT CLAIRE', '10.01', '150,00', 'C'),
+    ...line(701, [[68, '/MOTIF COMPLEMENT']]),
+    ...op(690, '11.01', 'VIR SEPA RECU /DE BANQUE EXEMPLE', '11.01', '40,00', 'C'),
+    ...line(680, [[68, '/MOTIF VIREMENT LIVRET A']]),
+    ...line(600, [[68, 'TOTAL DES OPERATIONS'], right(546, '190,00')]),
+  ];
+  const r = B.parseStatement([{ items: [...line(810, [[268, 'du 01 janvier 2026 au 31 janvier 2026']]), ...line(773, [[346, 'MME DUPONT CLAIRE']]), ...extra] }]);
+  assert.equal(r.operations.length, 2);
+  const own = r.operations[0];
+  assert.equal(own.transfer, 'own');
+  assert.ok(!own.roundtrip);
+  assert.deepEqual(B.suggest(own, {}), { category: 'Virement depuis épargne', recurring: false, ignore: false });
+  assert.equal(B.suggest(r.operations[1], {}).category, 'Virement depuis épargne');
+  // l'aller-retour du relevé principal reste ignoré
+  const back = st.operations.find((o) => o.kind === 'vir-in' && o.amount === 300);
+  assert.ok(back.roundtrip);
+  assert.equal(B.suggest(back, {}).ignore, true);
+});

@@ -199,10 +199,10 @@
     // Aller-retour : un virement vers soi-même et un virement opposé du même montant à moins de 10 jours
     // sont deux mouvements internes (ex. « TEMP » puis « TEMP RETOUR »).
     const days = (a, b) => Math.abs(new Date(a) - new Date(b)) / 864e5;
-    operations.filter((o) => o.transfer === 'own').forEach((o) => {
-      const twin = operations.find((x) => x !== o && !x.transfer && x.type !== o.type && x.amount === o.amount
-        && /^vir-/.test(x.kind) && days(x.date, o.date) <= 10);
-      if (twin) twin.transfer = 'own';
+    operations.filter((o) => o.transfer === 'own' && !o.roundtrip).forEach((o) => {
+      const twin = operations.find((x) => x !== o && !x.roundtrip && x.transfer !== 'joint' && x.type !== o.type
+        && x.amount === o.amount && /^vir-/.test(x.kind) && days(x.date, o.date) <= 10);
+      if (twin) { twin.transfer = 'own'; twin.roundtrip = true; o.roundtrip = true; }
     });
 
     const sumSide = (t) => round2(operations.filter((o) => o.type === t).reduce((s, o) => s + o.amount, 0));
@@ -262,12 +262,12 @@
       const lib = between(s, 'LIB/', [' MDT/', ' REF/', ' ID EMETTEUR']);
       return { kind: 'prlv', label: titleCase(creditor), detail: lib ? 'Prélèvement · ' + lib.toLowerCase() : 'Prélèvement', key: 'PRLV:' + normKey(creditor.replace(/\./g, ''), 3) };
     }
-    if (/^VIR(?:EMENT)?(?: SEPA)?(?: INSTANT)? EMIS/.test(s)) {
+    if (/^VIR(?:EMENT)?(?: SEPA)?(?: INSTANT)?(?: CPTE A CPTE)? EMIS/.test(s)) {
       const motif = between(s, '/MOTIF', ['/BEN', '/REFDO', '/REF']);
       const ben = between(s, '/BEN', ['/REFDO', '/REFBEN', '/REF', '/MOTIF']);
       return { kind: 'vir-out', label: 'Virement à ' + titleCase(ben || 'tiers'), detail: motifText(motif, 'Virement émis'), key: 'VIR>' + normKey(ben, 4), counterparty: ben };
     }
-    if (/^VIR(?:EMENT)?(?: SEPA)?(?: INSTANT)? RECU/.test(s)) {
+    if (/^VIR(?:EMENT)?(?: SEPA)?(?: INSTANT)?(?: CPTE A CPTE)? RECU/.test(s)) {
       const from = between(s, '/DE', ['/MOTIF', '/REF']);
       const motif = between(s, '/MOTIF', ['/REF', '/DE']);
       return { kind: 'vir-in', label: 'Virement de ' + titleCase(from || 'tiers'), detail: motifText(motif, 'Virement reçu'), key: 'VIR<' + normKey(from, 4), counterparty: from };
@@ -327,8 +327,11 @@
     let recurring = op.kind === 'prlv' || op.kind === 'vir-permanent';
     if (/SOLDE IMPOT|REGULARISATION/.test(text)) recurring = false;
 
+    // Virement reçu de son propre compte (Livret A, LDDS…) : importé, mais exclu des prédictions de revenus.
+    if (op.transfer === 'own' && !op.roundtrip && op.type === 'income') return { category: 'Virement depuis épargne', recurring: false, ignore: false };
     if (op.transfer === 'own') return { category: 'Virements internes', recurring: false, ignore: true };
     if (op.transfer === 'joint') return { category: 'Compte joint', recurring, ignore: false };
+    if (op.type === 'income' && /LIVRET|\bLDDS?\b|\bLEP\b|EPARGNE/.test(text)) return { category: 'Virement depuis épargne', recurring: false, ignore: false };
     if (op.kind === 'bank-fee') return { category: op.type === 'income' ? 'Remboursement' : 'Frais bancaires', recurring: false, ignore: false };
     if (op.kind === 'cash') return { category: 'Retraits d\'espèces', recurring: false, ignore: false };
     if (op.kind === 'card-refund') return { category: 'Remboursement', recurring: false, ignore: false };

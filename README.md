@@ -6,6 +6,11 @@ Application web installable sur téléphone (PWA) pour réduire la charge mental
   Un bouton reprend en un geste les lignes fixes du mois précédent. Solde, taux d'épargne, répartition par catégorie.
 - **Bilan** — 12 derniers mois en graphique + tableau, moyennes sur 6 mois (revenus, charges fixes / variables,
   épargne, « reste à vivre »), dépenses moyennes par catégorie.
+- **Prédiction du mois en cours et du mois suivant** (onglet Mois) — revenus et dépenses prévus :
+  lignes fixes au dernier montant connu, lignes variables en moyenne pondérée sur 6 mois (les mois récents comptent
+  davantage), + charges programmées. Pour le mois en cours : réalisé vs prévu, solde estimé en fin de mois et charges
+  fixes pas encore passées. Les catégories à ignorer se règlent dans Réglages › Prédictions ; les virements venant
+  du Livret A / de l'épargne ne sont jamais comptés comme revenus.
 - **Prévisions** — projection sur 12 mois = moyenne des 6 derniers mois saisis + charges programmées
   (régularisation d'impôt, taxe foncière, assurance annuelle…, ponctuelles ou répétées).
   Calcule aussi le montant à mettre de côté chaque mois pour couvrir ces échéances.
