@@ -28,7 +28,7 @@
     };
   }
   function defaultState() {
-    return { version: 1, entries: [], planned: [], importRules: {}, settings: { includeVariable: true, theme: 'auto', trendExclude: { expense: [], income: ['Virement depuis épargne'] }, trendDefaultsV2: true }, tax: defaultTax() };
+    return { version: 1, entries: [], planned: [], payslips: [], importRules: {}, settings: { includeVariable: true, theme: 'auto', trendExclude: { expense: [], income: ['Virement depuis épargne'] }, trendDefaultsV2: true }, tax: defaultTax() };
   }
   function load() {
     try {
@@ -606,8 +606,9 @@
           ${inputField('Taux de prélèvement actuel (%)', 'tax.tauxPAS', t.tauxPAS, { ph: 'ex. 7,5' })}
         </div>
         ${inputField('Autres revenus imposables nets (€/an)', 'tax.autresRevenus', t.autresRevenus)}
-        ${inputField('Total déjà prélevé sur l\'année (€) — facultatif', 'tax.dejaPreleve', t.dejaPreleve, { ph: 'vide = calcul avec le taux' })}
-        <p class="hint">Sans montant prélevé, l'outil suppose que votre taux actuel s'applique toute l'année.</p>
+        ${inputField('Total prélevé à la source sur l\'année (€) — facultatif', 'tax.dejaPreleve', t.dejaPreleve, { ph: 'vide = calcul avec le taux' })}
+        <p class="hint">Rempli automatiquement par l'import de vos bulletins de salaire (cumul projeté jusqu'en décembre).
+        Sans montant, l'outil suppose que votre taux actuel s'applique toute l'année.</p>
       </div>
       ${decl.map((i) => declarantForm(i)).join('')}
       <div id="tax-results">${taxResults()}</div>
@@ -622,8 +623,7 @@
       <div class="card">
         <h2>${T().couple ? `Déclarant ${i + 1}` : 'Vos revenus'}</h2>
         ${inputField('Salaire net imposable annuel (€)', p + '.netImposable', d.netImposable)}
-        <button class="btn small" data-action="estimate-salary" data-i="${i}">Estimer depuis mes saisies « Salaire »</button>
-        <p class="hint">Le net imposable figure sur la fiche de paie de décembre (cumul annuel). Il est un peu supérieur au net versé.</p>
+        ${payslipBlock(i)}
 
         <h3>Frais réels — trajets domicile-travail</h3>
         <div class="grid2">
@@ -658,6 +658,98 @@
           ${[['auto', 'La meilleure'], ['forfait', 'Forfait 10 %'], ['reels', 'Frais réels']].map(([v, l]) => `<button data-action="tax-mode" data-i="${i}" data-v="${v}" class="${(d.forceMode || 'auto') === v ? 'on' : ''}">${l}</button>`).join('')}
         </div>
       </div>`;
+  }
+
+  // ---------------------------------------------------------------- bulletins de salaire
+
+  const payslipsOf = (i, year) => (state.payslips || []).filter((p) => (p.declarant || 0) === i && (!year || p.month.startsWith(year + '-')))
+    .sort((a, b) => a.month.localeCompare(b.month));
+
+  function payslipBlock(i) {
+    const year = T().year;
+    const slips = payslipsOf(i, year);
+    const proj = window.PayslipImport.projectYear(slips, year);
+    const d = T().declarants[i];
+    const others = payslipsOf(i).filter((p) => !p.month.startsWith(year + '-')).length;
+    const msg = ui.payslipMsg && ui.payslipMsg.i === i ? ui.payslipMsg : null;
+    const lastLabel = proj ? monthLabel(proj.lastMonth) : '';
+    return `
+      <div class="row" style="margin-top:2px">
+        <label class="btn small primary">📄 Importer des bulletins de salaire (PDF)<input type="file" accept="application/pdf,.pdf" multiple data-action="import-payslip" data-i="${i}" hidden></label>
+        <button class="btn small" data-action="estimate-salary" data-i="${i}">Estimer depuis mes saisies</button>
+      </div>
+      ${msg ? `<p class="hint ${msg.bad ? 'neg' : 'pos'}" role="status">${msg.html}</p>` : ''}
+      <p class="hint">Le <b>net imposable</b> du bulletin est différent du net versé sur votre compte (il inclut notamment la CSG non déductible).
+      Les bulletins sont lus sur cet appareil et ne sont pas conservés : seuls les montants utiles sont enregistrés.</p>
+      ${proj ? `
+      <div class="verdict">
+        <strong>Estimation d'après ${proj.count} bulletin(s) ${year}</strong>
+        <div class="kv"><span>${proj.fromCumul ? `Cumul net imposable fin ${lastLabel}` : `Total des ${proj.knownMonths} bulletin(s)`}</span><span class="num">${eur(proj.knownNet)}</span></div>
+        ${proj.remaining ? `<div class="kv"><span>+ ${proj.remaining} mois × ${eur(proj.avgNet)} <span class="hint">(moyenne récente)</span></span><span class="num">${eur(proj.remaining * proj.avgNet)}</span></div>` : ''}
+        <div class="kv total"><span>Net imposable ${year} estimé</span><span class="num">${eur(proj.netImposable)}</span></div>
+        <div class="kv"><span>Prélevé à la source ${proj.remaining ? '(projeté)' : ''}</span><span class="num">${eur(proj.pas)}</span></div>
+        ${proj.taux != null ? `<div class="kv"><span>Taux du dernier bulletin</span><span class="num">${String(proj.taux).replace('.', ',')} %${proj.tauxType ? ' ' + proj.tauxType : ''}</span></div>` : ''}
+        ${Math.abs(num(d.netImposable) - proj.netImposable) > 0.5 ? `<button class="btn small primary block" data-action="apply-payslips" style="margin-top:8px">Utiliser cette estimation (${eur0(proj.netImposable)})</button>` : '<p class="hint pos" style="margin:6px 0 0">✓ Utilisée dans la simulation.</p>'}
+        ${proj.remaining ? '<p class="hint">Primes ou 13ᵉ mois à venir non inclus : le bulletin de décembre donnera le montant définitif à déclarer.</p>' : '<p class="hint">Bulletin de décembre importé : ce cumul est le montant à déclarer.</p>'}
+      </div>
+      <details style="margin-top:6px"><summary>Bulletins importés (${slips.length})</summary>
+        <ul class="list">${slips.slice().reverse().map((s) => `
+          <li><div class="grow"><div class="title" style="text-transform:capitalize">${monthLabel(s.month)}</div>
+            <div class="meta">net imposable ${eur(s.netImposable)}${s.pas && s.pas.montant != null ? ` · prélevé ${eur(s.pas.montant)}` : ''}${s.netPaye != null ? ` · versé ${eur(s.netPaye)}` : ''}${s.checkOk === false ? ' · <span class="neg">à vérifier</span>' : ''}</div></div>
+            <button class="iconbtn" data-action="del-payslip" data-id="${s.id}" aria-label="Supprimer le bulletin de ${monthLabel(s.month)}">×</button></li>`).join('')}</ul>
+      </details>` : ''}
+      ${others ? `<p class="hint">${others} bulletin(s) d'autres années enregistré(s) (changez l'année dans « Paramètres fiscaux » pour les voir).</p>` : ''}`;
+  }
+
+  /** Reporte les estimations des bulletins dans la simulation (net imposable, taux, total prélevé). */
+  function applyPayslips() {
+    const t = T();
+    const decl = t.couple ? [0, 1] : [0];
+    const projs = decl.map((i) => window.PayslipImport.projectYear(payslipsOf(i, t.year), t.year));
+    projs.forEach((p, i) => { if (p) t.declarants[i].netImposable = String(p.netImposable); });
+    const withTaux = projs.find((p) => p && p.taux != null);
+    if (withTaux) t.tauxPAS = String(withTaux.taux).replace('.', ',');
+    if (projs.every(Boolean)) t.dejaPreleve = String(C.round2(projs.reduce((a, p) => a + p.pas, 0)));
+    save();
+  }
+
+  async function importPayslips(files, i) {
+    ui.payslipMsg = { i, html: `Lecture de ${files.length} bulletin(s)…` };
+    render();
+    const ok = [], bad = [];
+    try {
+      const lib = await loadPdfjs();
+      for (const f of files) {
+        try {
+          const pages = await window.PayslipImport.extractPages(lib, new Uint8Array(await f.arrayBuffer()));
+          const r = window.PayslipImport.parsePayslip(pages);
+          if (r.netImposable == null || !r.month) { bad.push(`${f.name} : ${r.warnings[0] || 'illisible'}`); continue; }
+          state.payslips = (state.payslips || []).filter((p) => !((p.declarant || 0) === i && p.month === r.month));
+          state.payslips.push({
+            id: uid(), declarant: i, month: r.month, netImposable: r.netImposable, cumulNetImposable: r.cumulNetImposable,
+            brut: r.brut, netPaye: r.netPaye, pas: r.pas, checkOk: r.check.ok,
+          });
+          ok.push(r);
+          r.warnings.forEach((w) => bad.push(`${monthLabel(r.month)} : ${w}`));
+        } catch (e) {
+          bad.push(`${f.name} : ${e.message || e}`);
+        }
+      }
+    } catch (e) {
+      bad.push('Lecture des PDF impossible : ' + (e.message || e));
+    }
+    const years = [...new Set(ok.map((r) => Number(r.month.slice(0, 4))))];
+    if (ok.length && !years.includes(T().year) && years.length === 1
+      && confirm(`Ces bulletins concernent l'année ${years[0]}. Passer la simulation sur les revenus ${years[0]} ?`)) {
+      T().year = years[0];
+    }
+    if (ok.length) applyPayslips(); else save();
+    const done = ok.sort((a, b) => a.month.localeCompare(b.month)).map((r) => `${monthLabel(r.month)} : net imposable ${eur(r.netImposable)}${r.check.pasBaseMatches ? ' ✓' : ''}`);
+    ui.payslipMsg = {
+      i, bad: !ok.length,
+      html: [ok.length ? `${ok.length} bulletin(s) importé(s) — ${done.join(' · ')}` : 'Aucun bulletin importé.', ...bad.map(esc)].join('<br>'),
+    };
+    render();
   }
 
   function taxInput() {
@@ -1335,6 +1427,13 @@
     'add-frais': (el) => { T().declarants[Number(el.dataset.i)].frais.autres.push({ label: '', amount: '' }); save(); render(); },
     'del-frais': (el) => { T().declarants[Number(el.dataset.i)].frais.autres.splice(Number(el.dataset.k), 1); save(); render(); },
     'estimate-salary': (el) => estimateSalary(Number(el.dataset.i)),
+    'apply-payslips': () => { applyPayslips(); render(); toast('Estimation des bulletins appliquée'); },
+    'del-payslip': (el) => {
+      const s = (state.payslips || []).find((p) => p.id === el.dataset.id);
+      if (!s || !confirm(`Supprimer le bulletin de ${monthLabel(s.month)} ?`)) return;
+      state.payslips = state.payslips.filter((p) => p !== s);
+      applyPayslips(); ui.payslipMsg = null; render();
+    },
     'plan-regul': planRegul,
     'reset-params': () => { if (confirm('Rétablir les paramètres fiscaux par défaut ?')) { T().params = JSON.parse(JSON.stringify(C.DEFAULT_TAX_PARAMS)); save(); render(); } },
     theme: (el) => { state.settings.theme = el.dataset.v; save(); applyTheme(); render(); },
@@ -1400,6 +1499,9 @@
     }
     if (el.dataset.bind && (el.tagName === 'SELECT' || el.type === 'checkbox')) bindInput(el);
     if (el.dataset.action === 'import-pdf' && el.files[0]) readStatement(el.files[0]);
+    if (el.dataset.action === 'import-payslip' && el.files.length) {
+      importPayslips([...el.files], Number(el.dataset.i)).finally(() => { el.value = ''; });
+    }
     if (el.dataset.imp && ui.imp && ui.imp.rows) {
       const r = ui.imp.rows[Number(el.dataset.i)];
       if (el.dataset.imp === 'include') { r.include = el.checked; el.closest('li').style.opacity = el.checked ? '' : '.55'; }

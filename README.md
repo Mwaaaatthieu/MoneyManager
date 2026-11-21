@@ -20,6 +20,10 @@ Application web installable sur téléphone (PWA) pour réduire la charge mental
 - **Impôts** — comparaison abattement 10 % / frais réels (barème kilométrique, repas, télétravail, autres frais),
   impôt estimé (quotient familial et son plafonnement, décote), taux de prélèvement à la source adapté,
   régularisation attendue — qu'on peut ajouter d'un clic aux prévisions.
+- **Import de bulletins de salaire (PDF, modèle Silae et formats proches)** — onglet Impôts : le net imposable
+  du mois et son cumul annuel sont lus (et vérifiés avec la base du prélèvement à la source), ainsi que le taux et
+  le cumul du prélèvement à la source. Le net imposable de l'année et le total prélevé sont projetés jusqu'en
+  décembre et reportés dans la simulation. Lecture locale, le PDF n'est pas conservé.
 - **Import de relevés BNP Paribas (PDF)** — depuis l'onglet Mois : les opérations sont extraites du relevé,
   vérifiées avec le « Total des opérations », pré-catégorisées (les prélèvements marqués fixes, les virements
   entre vos propres comptes exclus), puis vous validez. Vos corrections sont retenues pour les imports suivants
@@ -48,6 +52,7 @@ npm test    # tests du moteur de calcul (Node ≥ 18)
 
 - `js/calc.js` : calculs purs (bilan, prévisions, impôt) — testés dans `tests/`.
 - `js/bnp-import.js` : lecture et analyse des relevés BNP Paribas — testé sur un relevé fictif dans `tests/`.
+- `js/payslip-import.js` : lecture des bulletins de salaire et projection annuelle — testé sur un bulletin fictif.
 - `js/vendor/pdfjs/` : [pdf.js](https://mozilla.github.io/pdf.js/) 4.10.38 (Apache-2.0), embarqué pour fonctionner hors connexion.
 - `js/app.js` : interface (vanilla JS, sans dépendance ni build).
 
