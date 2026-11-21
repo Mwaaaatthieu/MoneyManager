@@ -16,7 +16,7 @@
   function blankDeclarant() {
     return {
       netImposable: '', forceMode: 'auto',
-      frais: { cv: 5, electric: false, kmJour: '', joursTrajet: '', kmAutres: '', nbRepas: '', coutRepas: '',
+      frais: { cv: 5, electric: false, kmJour: '', joursTrajet: '', kmAutres: '', nbRepasMaison: '', nbRepas: '', coutRepas: '', partEmployeur: '',
         joursTeletravail: '', autres: [] },
     };
   }
@@ -48,12 +48,17 @@
       return {
         ...d, ...s,
         settings,
-        tax: { ...d.tax, ...(s.tax || {}), params: { ...d.tax.params, ...((s.tax || {}).params || {}) } },
+        tax: migrateTax({ ...d.tax, ...(s.tax || {}), params: { ...d.tax.params, ...((s.tax || {}).params || {}) } }),
       };
     } catch (e) {
       console.error(e);
       return defaultState();
     }
+  }
+  /** v1.6 : la valeur du repas au foyer dépend de l'année ; l'ancienne valeur par défaut figée (5,35 €) est retirée. */
+  function migrateTax(tax) {
+    if (tax.params && Number(tax.params.repasForfait) === 5.35) tax.params.repasForfait = null;
+    return tax;
   }
   let state = load();
   function save() {
@@ -637,11 +642,17 @@
         ${inputField('Autres km professionnels / an', p + '.frais.kmAutres', f.kmAutres)}
         <p class="hint">Au-delà de 40 km aller, seuls 40 km sont admis sauf justification.</p>
 
-        <h3>Repas et télétravail</h3>
+        <h3>Repas sur le lieu de travail</h3>
+        <p class="hint">Déductibles si vous ne pouvez pas rentrer déjeuner chez vous (distance, horaires).</p>
+        ${inputField('Repas préparés à domicile, sans justificatif (nombre / an)', p + '.frais.nbRepasMaison', f.nbRepasMaison, { ph: 'ex. 218' })}
         <div class="grid2">
-          ${inputField('Repas pris hors domicile / an', p + '.frais.nbRepas', f.nbRepas)}
-          ${inputField('Coût moyen d\'un repas (€)', p + '.frais.coutRepas', f.coutRepas)}
+          ${inputField('Repas achetés, avec justificatifs (nombre / an)', p + '.frais.nbRepas', f.nbRepas)}
+          ${inputField('Prix moyen que vous payez par repas (€)', p + '.frais.coutRepas', f.coutRepas, { ph: 'ex. 12' })}
         </div>
+        ${inputField('Part payée par l\'employeur par repas (titres-restaurant, prime de panier) (€)', p + '.frais.partEmployeur', f.partEmployeur)}
+        <div class="verdict" id="repas-detail-${i}" style="margin-top:4px">${repasDetailHtml(i)}</div>
+
+        <h3>Télétravail</h3>
         ${inputField('Jours de télétravail / an', p + '.frais.joursTeletravail', f.joursTeletravail)}
 
         <h3>Autres frais (formation, double résidence, matériel…)</h3>
@@ -752,6 +763,32 @@
     render();
   }
 
+  /** Détail lisible du calcul des frais de repas d'un déclarant. */
+  function repasDetailHtml(i) {
+    const input = taxInput();
+    const params = { ...C.DEFAULT_TAX_PARAMS, ...input.params, year: input.year };
+    const custom = params.repasForfait != null && params.repasForfait !== '';
+    const forfait = C.repasFoyer(input.year, params);
+    const r = C.fraisRepas(input.declarants[i].frais, { ...params, repasForfait: forfait });
+    const lines = [];
+    if (r.maison.nb) {
+      lines.push(`<div class="kv"><span>Préparés à domicile : ${r.maison.nb} × ${r.part ? `(${eur(forfait)} − ${eur(r.part)})` : eur(forfait)}</span><span class="num">${eur(r.maison.total)}</span></div>`);
+    }
+    if (r.achetes.nb) {
+      lines.push(`<div class="kv"><span>Achetés : ${r.achetes.nb} × (${eur(r.achetes.prixRetenu)} − ${eur(forfait)}${r.part ? ` − ${eur(r.part)}` : ''})</span><span class="num">${eur(r.achetes.total)}</span></div>`);
+      if (r.achetes.plafonne) lines.push(`<p class="hint" style="margin:0">Prix plafonné à ${eur(params.repasPlafond)} par repas.</p>`);
+      if (!r.achetes.prix) lines.push('<p class="hint neg" style="margin:0">Indiquez le prix moyen que vous payez par repas.</p>');
+    }
+    if (r.prixTropBas) {
+      lines.push(`<p class="hint neg" style="margin:4px 0 0">⚠ Le prix saisi ne dépasse pas la valeur d'un repas pris au foyer (${eur(forfait)}${r.part ? ' + part employeur' : ''}) : aucune déduction.
+        S'il s'agit de repas préparés chez vous, saisissez-les plutôt sur la ligne « sans justificatif ».</p>`);
+    }
+    const origin = custom ? 'valeur saisie' : C.REPAS_FOYER[input.year] == null ? 'dernière valeur connue' : input.year >= 2026 ? 'annoncée, à confirmer sur impots.gouv' : 'impots.gouv';
+    return `<div class="kv total" style="margin-top:0;border-top:0;padding-top:0"><span>Frais de repas déductibles</span><span class="num">${eur(r.total)}</span></div>`
+      + (lines.length ? lines.join('') : '<p class="hint" style="margin:0">Aucun repas saisi.</p>')
+      + `<p class="hint" style="margin:4px 0 0">Valeur d'un repas pris au foyer, revenus ${input.year} : ${eur(forfait)} (${origin}). Modifiable dans « Paramètres fiscaux ».</p>`;
+  }
+
   function taxInput() {
     const t = T();
     const numify = (o) => {
@@ -762,7 +799,7 @@
     return {
       couple: t.couple, parts: num(t.parts) || (t.couple ? 2 : 1), tauxPAS: num(t.tauxPAS),
       dejaPreleve: String(t.dejaPreleve).trim() === '' ? '' : num(t.dejaPreleve),
-      autresRevenus: num(t.autresRevenus), params: t.params,
+      autresRevenus: num(t.autresRevenus), params: t.params, year: num(t.year) || new Date().getFullYear(),
       declarants: t.declarants.map((d) => ({ netImposable: num(d.netImposable), forceMode: d.forceMode, frais: numify(d.frais) })),
     };
   }
@@ -831,9 +868,9 @@
           <div class="grid2">
             ${[['abattementMin', 'Abattement 10 % min'], ['abattementMax', 'Abattement 10 % max'], ['plafondDemiPart', 'Plafond par demi-part'],
     ['decoteSingle', 'Décote personne seule'], ['decoteCouple', 'Décote couple'], ['decoteRate', 'Taux de décote'],
-    ['repasForfait', 'Valeur repas au domicile'], ['repasPlafond', 'Plafond coût repas'],
+    ['repasForfait', 'Valeur repas au foyer (vide = selon l\'année)'], ['repasPlafond', 'Plafond prix d\'un repas'],
     ['teletravailJour', 'Télétravail €/jour'], ['teletravailPlafond', 'Télétravail plafond']]
-    .map(([k, l]) => inputField(l, 'tax.params.' + k, p[k])).join('')}
+    .map(([k, l]) => inputField(l, 'tax.params.' + k, p[k] == null ? '' : p[k], k === 'repasForfait' ? { ph: String(C.repasFoyer(T().year, {})).replace('.', ',') + ' (' + T().year + ')' } : {})).join('')}
           </div>
           <button class="btn small danger" data-action="reset-params">Rétablir les valeurs par défaut</button>
         </details>
@@ -1518,11 +1555,13 @@
   function bindInput(el) {
     const path = el.dataset.bind;
     let v = el.type === 'checkbox' ? el.checked : el.value;
-    if (path.startsWith('tax.params.') || path === 'tax.year') v = num(v);
+    if (path === 'tax.params.repasForfait' && String(v).trim() === '') v = null; // vide = valeur de l'année
+    else if (path.startsWith('tax.params.') || path === 'tax.year') v = num(v);
     setPath(path, v);
     save();
     const res = document.getElementById('tax-results');
     if (res) res.innerHTML = taxResults();
+    [0, 1].forEach((k) => { const box = document.getElementById('repas-detail-' + k); if (box) box.innerHTML = repasDetailHtml(k); });
   }
 
   // ---------------------------------------------------------------- rendu

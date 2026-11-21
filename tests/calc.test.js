@@ -160,3 +160,38 @@ test('prévisions 12 mois : mêmes exclusions que la prédiction mensuelle', () 
   const p = C.predictMonth({ entries: history(), planned: [] }, '2026-12', '2026-12', { exclude: { expense: ['Loisirs'] } });
   assert.equal(f.rows[0].savings, p.balance);
 });
+
+// ---------- frais de repas ----------
+test('repas : valeur du repas au foyer selon l\'année, modifiable', () => {
+  assert.equal(C.repasFoyer(2024, P), 5.35);
+  assert.equal(C.repasFoyer(2026, P), 5.5);
+  assert.equal(C.repasFoyer(2031, P), 5.5); // année future : dernière valeur connue
+  assert.equal(C.repasFoyer(2026, { ...P, repasForfait: 5.6 }), 5.6);
+});
+
+test('repas préparés à domicile sans justificatif : forfait par repas', () => {
+  const fr = C.fraisReels({ nbRepasMaison: 218 }, { ...P, year: 2026 });
+  assert.equal(fr.repas, 1199); // 218 × 5,50
+  assert.equal(fr.repasDetail.maison.parRepas, 5.5);
+});
+
+test('repas achetés avec justificatifs : (prix − valeur au foyer − part employeur), prix plafonné', () => {
+  const p26 = { ...P, year: 2026 };
+  assert.equal(C.fraisReels({ nbRepas: 218, coutRepas: 12 }, p26).repas, 1417); // 218 × 6,50
+  assert.equal(C.fraisReels({ nbRepas: 100, coutRepas: 12, partEmployeur: 4.5 }, p26).repas, 200); // 100 × 2,00
+  const cher = C.fraisReels({ nbRepas: 10, coutRepas: 30 }, p26);
+  assert.ok(cher.repasDetail.achetes.plafonne);
+  assert.equal(cher.repas, C.round2(10 * (20.70 - 5.5)));
+});
+
+test('repas : prix saisi trop bas signalé (le cas des 33 €)', () => {
+  const fr = C.fraisReels({ nbRepas: 218, coutRepas: 5.5 }, { ...P, year: 2026 });
+  assert.equal(fr.repas, 0);
+  assert.ok(fr.repasDetail.prixTropBas);
+});
+
+test('repas : les deux types se cumulent et la simulation utilise l\'année', () => {
+  const sim = C.simulateTax({ year: 2026, couple: false, parts: 1,
+    declarants: [{ netImposable: 30000, frais: { nbRepasMaison: 150, nbRepas: 68, coutRepas: 12 } }] });
+  assert.equal(sim.declarants[0].fraisReels.repas, C.round2(150 * 5.5 + 68 * 6.5));
+});

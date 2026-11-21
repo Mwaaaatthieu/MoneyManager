@@ -249,11 +249,47 @@
     decoteCouple: 1470,
     decoteRate: 0.4525,
     seuilRecouvrement: 61,
-    repasForfait: 5.35, // valeur d'un repas pris au domicile
-    repasPlafond: 20.70, // plafond du coût d'un repas retenu
+    repasForfait: null, // valeur d'un repas pris au foyer : null = selon l'année (REPAS_FOYER)
+    repasPlafond: 20.70, // plafond du prix d'un repas retenu
     teletravailJour: 2.70,
     teletravailPlafond: 659.70,
   };
+
+  /**
+   * Valeur d'un repas pris au foyer, par année de revenus (impots.gouv).
+   * 2026 : 5,50 € annoncé, à confirmer lors de la publication du barème (printemps 2027).
+   */
+  const REPAS_FOYER = { 2023: 5.20, 2024: 5.35, 2025: 5.45, 2026: 5.50 };
+  function repasFoyer(year, params) {
+    if (params && params.repasForfait != null && params.repasForfait !== '') return Number(params.repasForfait);
+    const years = Object.keys(REPAS_FOYER).map(Number).sort();
+    const y = Number(year) || years[years.length - 1];
+    if (REPAS_FOYER[y] != null) return REPAS_FOYER[y];
+    return y < years[0] ? REPAS_FOYER[years[0]] : REPAS_FOYER[years[years.length - 1]];
+  }
+
+  /**
+   * Frais de repas pris sur le lieu de travail (obligation de ne pas rentrer déjeuner).
+   * - repas achetés, avec justificatifs : (prix payé plafonné − valeur du repas au foyer − part employeur) par repas ;
+   * - repas préparés au domicile, sans justificatif : forfait = valeur du repas au foyer (− part employeur) par repas.
+   */
+  function fraisRepas(i, params) {
+    const forfait = params.repasForfait;
+    const part = Math.max(0, i.partEmployeur || 0);
+    const nbA = Math.max(0, i.nbRepas || 0);
+    const prix = Math.max(0, i.coutRepas || 0);
+    const prixRetenu = Math.min(prix, params.repasPlafond);
+    const parRepasA = Math.max(0, prixRetenu - forfait - part);
+    const nbM = Math.max(0, i.nbRepasMaison || 0);
+    const parRepasM = Math.max(0, forfait - part);
+    const achetes = { nb: nbA, prix, prixRetenu, plafonne: prix > params.repasPlafond, parRepas: round2(parRepasA), total: round2(nbA * parRepasA) };
+    const maison = { nb: nbM, parRepas: round2(parRepasM), total: round2(nbM * parRepasM) };
+    return {
+      forfait, part, achetes, maison,
+      total: round2(achetes.total + maison.total),
+      prixTropBas: nbA > 0 && prix > 0 && parRepasA === 0,
+    };
+  }
 
   /** Barème kilométrique automobile (frais réels) — revenus 2024. */
   const BAREME_KM = {
@@ -283,11 +319,11 @@
   function fraisReels(input, params) {
     const i = input || {};
     const km = kmAllowance(i.cv, (i.kmJour || 0) * 2 * (i.joursTrajet || 0) + (i.kmAutres || 0), i.electric);
-    const coutRetenu = Math.min(i.coutRepas || 0, params.repasPlafond);
-    const repas = round2(Math.max(0, coutRetenu - params.repasForfait) * (i.nbRepas || 0));
+    const repasDetail = fraisRepas(i, { ...params, repasForfait: repasFoyer(params.year, params) });
+    const repas = repasDetail.total;
     const teletravail = round2(Math.min((i.joursTeletravail || 0) * params.teletravailJour, params.teletravailPlafond));
     const autres = round2(sum(i.autres || [], (x) => Number(x.amount) || 0));
-    return { km, repas, teletravail, autres, total: round2(km + repas + teletravail + autres) };
+    return { km, repas, repasDetail, teletravail, autres, total: round2(km + repas + teletravail + autres) };
   }
 
   function baremeImpot(revenuParPart, brackets) {
@@ -348,7 +384,7 @@
    *         tauxPAS (%), dejaPreleve (optionnel), params }
    */
   function simulateTax(tax) {
-    const params = { ...DEFAULT_TAX_PARAMS, ...(tax.params || {}) };
+    const params = { ...DEFAULT_TAX_PARAMS, ...(tax.params || {}), year: tax.year };
     const declarants = (tax.declarants || []).slice(0, tax.couple ? 2 : 1).map((d) => {
       const net = Number(d.netImposable) || 0;
       const abat = abattement10(net, params);
@@ -395,7 +431,7 @@
     monthKey, addMonths, monthsBetween, round2,
     monthSummary, referenceWindow, averages, forecast, provisions,
     predictMonth, predictionWindow, isTrendExcluded, SAVINGS_CATEGORY,
-    DEFAULT_TAX_PARAMS, BAREME_KM, kmAllowance, abattement10, fraisReels,
+    DEFAULT_TAX_PARAMS, BAREME_KM, REPAS_FOYER, repasFoyer, fraisRepas, kmAllowance, abattement10, fraisReels,
     baremeImpot, impotRevenu, simulateTax,
   };
 
