@@ -50,6 +50,34 @@
     };
   }
 
+  // ---------- Épargne (Livret A…) ----------
+
+  /** Catégories par défaut des mouvements d'épargne. */
+  const SAVINGS_DEPOSIT_CATEGORY = 'Versement sur épargne'; // dépense : compte courant → Livret A
+  const DEFAULT_SAVINGS_CATS = { expense: [SAVINGS_DEPOSIT_CATEGORY], income: ['Virement depuis épargne'] };
+
+  const isSavingsMove = (e, cats) => ((cats && cats[e.type]) || []).includes(e.category);
+
+  /**
+   * Bilan d'un mois en séparant les mouvements d'épargne :
+   * revenus et dépenses hors épargne, et épargne réelle = versements − retraits.
+   */
+  function savingsSummary(entries, month, cats) {
+    cats = cats || DEFAULT_SAVINGS_CATS;
+    const inMonth = entries.filter((e) => e.month === month);
+    const moves = inMonth.filter((e) => isSavingsMove(e, cats));
+    const deposits = round2(sum(moves.filter((e) => e.type === 'expense'), (e) => e.amount));
+    const withdrawals = round2(sum(moves.filter((e) => e.type === 'income'), (e) => e.amount));
+    const base = monthSummary(inMonth.filter((e) => !isSavingsMove(e, cats)), month);
+    return {
+      ...base,
+      count: inMonth.length,
+      deposits, withdrawals,
+      savings: round2(deposits - withdrawals),
+      realSavingsRate: base.income > 0 ? (deposits - withdrawals) / base.income : null,
+    };
+  }
+
   // ---------- Prévisions ----------
 
   /**
@@ -429,7 +457,8 @@
 
   const Calc = {
     monthKey, addMonths, monthsBetween, round2,
-    monthSummary, referenceWindow, averages, forecast, provisions,
+    monthSummary, savingsSummary, isSavingsMove, DEFAULT_SAVINGS_CATS, SAVINGS_DEPOSIT_CATEGORY,
+    referenceWindow, averages, forecast, provisions,
     predictMonth, predictionWindow, isTrendExcluded, SAVINGS_CATEGORY,
     DEFAULT_TAX_PARAMS, BAREME_KM, REPAS_FOYER, repasFoyer, fraisRepas, kmAllowance, abattement10, fraisReels,
     baremeImpot, impotRevenu, simulateTax,

@@ -195,3 +195,27 @@ test('repas : les deux types se cumulent et la simulation utilise l\'année', ()
     declarants: [{ netImposable: 30000, frais: { nbRepasMaison: 150, nbRepas: 68, coutRepas: 12 } }] });
   assert.equal(sim.declarants[0].fraisReels.repas, C.round2(150 * 5.5 + 68 * 6.5));
 });
+
+// ---------- épargne (Livret A) dans le bilan ----------
+test('bilan : versements et retraits du Livret A sortis des dépenses et revenus, épargne réelle', () => {
+  const entries = [
+    { month: '2026-10', type: 'income', category: 'Salaire', amount: 3000 },
+    { month: '2026-10', type: 'income', category: 'Virement depuis épargne', amount: 200 },
+    { month: '2026-10', type: 'expense', category: 'Logement', amount: 900 },
+    { month: '2026-10', type: 'expense', category: 'Versement sur épargne', amount: 700 },
+    { month: '2026-09', type: 'expense', category: 'Versement sur épargne', amount: 999 },
+  ];
+  const s = C.savingsSummary(entries, '2026-10');
+  assert.equal(s.income, 3000);
+  assert.equal(s.expense, 900);
+  assert.equal(s.deposits, 700);
+  assert.equal(s.withdrawals, 200);
+  assert.equal(s.savings, 500);
+  assert.equal(s.balance, 2100);
+  assert.equal(s.realSavingsRate, 500 / 3000);
+  assert.equal(s.byCategory['Versement sur épargne'], undefined);
+  // catégories personnalisées ; retrait supérieur aux versements → épargne négative
+  const t = C.savingsSummary(entries, '2026-10', { expense: [], income: ['Virement depuis épargne'] });
+  assert.equal(t.expense, 1600);
+  assert.equal(t.savings, -200);
+});

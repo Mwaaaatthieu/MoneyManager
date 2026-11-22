@@ -7,7 +7,7 @@
   const DEFAULT_CATS = {
     expense: ['Logement', 'Alimentation', 'Transport', 'Énergie', 'Assurances', 'Abonnements', 'Santé',
       'Loisirs', 'Restaurants & sorties', 'Shopping', 'Enfants', 'Impôts & taxes', 'Crédit', 'Cadeaux',
-      'Frais bancaires', 'Retraits d\'espèces', 'Virements', 'Compte joint', 'Virements internes', 'Autre'],
+      'Frais bancaires', 'Retraits d\'espèces', 'Virements', 'Compte joint', 'Versement sur épargne', 'Virements internes', 'Autre'],
     income: ['Salaire', 'Prime', 'Allocations', 'Remboursement', 'Revenus locatifs', 'Virement depuis épargne', 'Autre revenu'],
   };
 
@@ -28,7 +28,8 @@
     };
   }
   function defaultState() {
-    return { version: 1, entries: [], planned: [], payslips: [], importRules: {}, settings: { includeVariable: true, theme: 'auto', trendExclude: { expense: [], income: ['Virement depuis épargne'] }, trendDefaultsV2: true }, tax: defaultTax() };
+    return { version: 1, entries: [], planned: [], payslips: [], importRules: {}, settings: { includeVariable: true, theme: 'auto', trendExclude: { expense: ['Versement sur épargne'], income: ['Virement depuis épargne'] }, trendDefaultsV2: true, savingsDefaultsV3: true,
+      savingsCats: { expense: ['Versement sur épargne'], income: ['Virement depuis épargne'] } }, tax: defaultTax() };
   }
   function load() {
     try {
@@ -44,6 +45,14 @@
         if (!t.income.includes('Virement depuis épargne')) t.income.push('Virement depuis épargne');
         settings.trendExclude = t;
         settings.trendDefaultsV2 = true;
+      }
+      // Migration (v1.7) : les versements sur l'épargne ne sont pas des dépenses à prévoir.
+      if (!(s.settings && s.settings.savingsDefaultsV3)) {
+        const t = settings.trendExclude || { expense: [], income: [] };
+        t.expense = t.expense || [];
+        if (!t.expense.includes('Versement sur épargne')) t.expense.push('Versement sur épargne');
+        settings.trendExclude = t;
+        settings.savingsDefaultsV3 = true;
       }
       return {
         ...d, ...s,
@@ -336,12 +345,17 @@
   // ---------------------------------------------------------------- vue : Bilan
 
   function historyHidden() { return state.settings.historyHidden || []; }
+  function savingsCats() {
+    const c = state.settings.savingsCats || C.DEFAULT_SAVINGS_CATS;
+    return { expense: c.expense || [], income: c.income || [] };
+  }
 
   /** Catégories de dépenses utilisées, triées par montant sur les 12 derniers mois. */
   function expenseCategoriesByTotal() {
     const since = C.addMonths(C.monthKey(), -11);
     const tot = {};
-    state.entries.filter((e) => e.type === 'expense').forEach((e) => {
+    const sc = savingsCats();
+    state.entries.filter((e) => e.type === 'expense' && !C.isSavingsMove(e, sc)).forEach((e) => {
       const c = e.category || 'Autre';
       if (!(c in tot)) tot[c] = 0;
       if (e.month >= since) tot[c] += e.amount;
@@ -364,16 +378,26 @@
     const allCats = expenseCategoriesByTotal();
     const shownCats = allCats.filter(([c]) => !hidden.has(c));
     const filtered = hidden.size > 0;
-    const entries = state.entries.filter((e) => e.type === 'income' || !hidden.has(e.category || 'Autre'));
+    // Mouvements du Livret A : hors revenus et dépenses, mais comptés dans l'épargne réelle.
+    const sc = savingsCats();
+    const isSav = (e) => C.isSavingsMove(e, sc);
+    const entries = state.entries.filter((e) => isSav(e) || e.type === 'income' || !hidden.has(e.category || 'Autre'));
+    const flows = entries.filter((e) => !isSav(e));
 
-    const rows = months.map((m) => C.monthSummary(entries, m));
+    const rows = months.map((m) => C.savingsSummary(entries, m, sc));
     const win = C.referenceWindow(state.entries, cur, 6);
-    const avg = C.averages(entries, win);
+    const avg = C.averages(flows, win);
     const avgInc = avg.recIncome + avg.varIncome;
     const avgExp = avg.recExpense + avg.varExpense;
+    const winRows = rows.filter((r) => win.includes(r.month));
+    const avgOf = (k) => (win.length ? winRows.reduce((a, r) => a + r[k], 0) / win.length : 0);
+    const avgDep = avgOf('deposits');
+    const avgWit = avgOf('withdrawals');
+    const avgSav = avgDep - avgWit;
+    const hasSavings = state.entries.some(isSav);
 
     const catTotals = {};
-    entries.filter((e) => e.type === 'expense' && win.includes(e.month))
+    flows.filter((e) => e.type === 'expense' && win.includes(e.month))
       .forEach((e) => { const c = e.category || 'Autre'; catTotals[c] = (catTotals[c] || 0) + e.amount; });
     const cats = Object.entries(catTotals).map(([c, v]) => [c, v / (win.length || 1)]).sort((a, b) => b[1] - a[1]);
 
@@ -388,11 +412,14 @@
 
     const series = filtered
       ? [{ key: 'expense', cls: 'b-exp', label: 'Dépenses' }]
-      : [{ key: 'income', cls: 'b-inc', label: 'Revenus' }, { key: 'expense', cls: 'b-exp', label: 'Dépenses' }];
+      : [{ key: 'income', cls: 'b-inc', label: 'Revenus' }, { key: 'expense', cls: 'b-exp', label: 'Dépenses' },
+        { key: 'savings', cls: 'b-saving', label: 'Épargne réelle' }];
     const chart = barChart('hist', rows, series, (r) => `<b>${monthLabel(r.month)}</b>${filtered ? ''
       : tipRow('income', 'Revenus', eur0(r.income))}${tipRow('expense', filtered ? 'Dépenses filtrées' : 'Dépenses', eur0(r.expense))}${filtered ? ''
-      : tipRow('', 'Solde', `<span class="${cls(r.balance)}">${signed(Math.round(r.balance))}</span>`)}`,
-    { label: filtered ? 'Dépenses filtrées des 12 derniers mois' : 'Revenus et dépenses des 12 derniers mois' });
+      : tipRow('saving', 'Épargne réelle', `<span class="${cls(r.savings)}">${signed(Math.round(r.savings))}</span>`)
+        + (r.deposits || r.withdrawals ? `<div class="tr"><span style="padding-left:16px">versé ${eur0(r.deposits)} · retiré ${eur0(r.withdrawals)}</span><span></span></div>` : '')
+        + tipRow('', 'Revenus − dépenses', `<span class="${cls(r.balance)}">${signed(Math.round(r.balance))}</span>`)}`,
+    { label: filtered ? 'Dépenses filtrées des 12 derniers mois' : 'Revenus, dépenses et épargne réelle des 12 derniers mois' });
 
     const stats = filtered ? `
       <div class="stats">
@@ -402,23 +429,28 @@
       <div class="stats">
         <div class="stat"><div class="lbl"><i class="dot income"></i>Revenus moyens</div><div class="val num">${eur0(avgInc)}</div><div class="sub">dont fixes ${eur0(avg.recIncome)}</div></div>
         <div class="stat"><div class="lbl"><i class="dot expense"></i>Dépenses moyennes</div><div class="val num">${eur0(avgExp)}</div><div class="sub">fixes ${eur0(avg.recExpense)} · var. ${eur0(avg.varExpense)}</div></div>
-        <div class="stat wide"><div class="lbl">Épargne moyenne / mois</div><div class="val num ${cls(avgInc - avgExp)}">${signed(Math.round(avgInc - avgExp))}</div>
-          <div class="sub">Taux d'épargne moyen : ${pct(avgInc > 0 ? (avgInc - avgExp) / avgInc : null)} · « reste à vivre » après charges fixes : ${eur0(avg.recIncome - avg.recExpense)}</div></div>
+        <div class="stat wide"><div class="lbl"><i class="dot saving"></i>Épargne réelle moyenne / mois (Livret A)</div><div class="val num ${cls(avgSav)}">${signed(Math.round(avgSav))}</div>
+          <div class="sub">${hasSavings ? `versé ${eur0(avgDep)} · retiré ${eur0(avgWit)} · taux d'épargne réel ${pct(avgInc > 0 ? avgSav / avgInc : null)}`
+    : 'Aucun mouvement d\'épargne : classez vos virements vers le Livret A en « Versement sur épargne » et les retraits en « Virement depuis épargne ».'}</div></div>
+        <div class="stat wide"><div class="lbl">Capacité d'épargne (revenus − dépenses)</div><div class="val num ${cls(avgInc - avgExp)}">${signed(Math.round(avgInc - avgExp))}</div>
+          <div class="sub">${pct(avgInc > 0 ? (avgInc - avgExp) / avgInc : null)} des revenus · « reste à vivre » après charges fixes : ${eur0(avg.recIncome - avg.recExpense)}${hasSavings && Math.abs(avgInc - avgExp - avgSav) >= 1 ? ` · ${avgInc - avgExp > avgSav ? 'non placé sur le Livret A' : 'puisé dans le compte courant'} : ${eur0(Math.abs(avgInc - avgExp - avgSav))}` : ''}</div></div>
       </div>`;
 
     return `
       ${filterBar}
-      <p class="hint">Moyennes calculées sur ${win.length} mois : ${win.map(monthShort).join(', ') || '—'} (mois en cours exclu).</p>
+      <p class="hint">Moyennes calculées sur ${win.length} mois : ${win.map(monthShort).join(', ') || '—'} (mois en cours exclu).
+        Les mouvements du Livret A (${[...sc.expense, ...sc.income].map(esc).join(', ') || 'aucune catégorie'}) sont exclus des revenus et des dépenses
+        (<a href="#" data-action="goto-savings-settings">régler</a>).</p>
       ${stats}
 
       <div class="card">
         <h2>12 derniers mois</h2>
-        ${filtered ? '' : '<div class="legend"><span><i class="dot income"></i>Revenus</span><span><i class="dot expense"></i>Dépenses</span></div>'}
+        ${filtered ? '' : '<div class="legend"><span><i class="dot income"></i>Revenus</span><span><i class="dot expense"></i>Dépenses</span><span><i class="dot saving"></i>Épargne réelle</span></div>'}
         ${chart}
         <details><summary>Voir le tableau</summary>
-          <div class="scroll-x"><table class="data"><thead><tr><th>Mois</th>${filtered ? '<th>Dépenses</th>' : '<th>Revenus</th><th>Dépenses</th><th>Solde</th><th>Taux</th>'}</tr></thead><tbody>
+          <div class="scroll-x"><table class="data"><thead><tr><th>Mois</th>${filtered ? '<th>Dépenses</th>' : '<th>Revenus</th><th>Dépenses</th><th>Épargne</th><th>Taux</th>'}</tr></thead><tbody>
           ${rows.slice().reverse().filter((r) => r.count).map((r) => `<tr><td>${monthLabel(r.month)}</td>${filtered ? `<td class="num">${eur0(r.expense)}</td>`
-    : `<td class="num">${eur0(r.income)}</td><td class="num">${eur0(r.expense)}</td><td class="num ${cls(r.balance)}">${signed(Math.round(r.balance))}</td><td class="num">${pct(r.savingsRate, 0)}</td>`}</tr>`).join('')}
+    : `<td class="num">${eur0(r.income)}</td><td class="num">${eur0(r.expense)}</td><td class="num ${cls(r.savings)}">${signed(Math.round(r.savings))}</td><td class="num">${pct(r.realSavingsRate, 0)}</td>`}</tr>`).join('')}
           </tbody></table></div></details>
       </div>
 
@@ -1056,6 +1088,7 @@
         <p class="hint" id="version-status" role="status">Vérification de la dernière version…</p>
         <div id="version-action"></div>
       </div>
+      ${savingsSettingsCard()}
       ${trendSettingsCard()}
       <div class="card">
         <h2>Apparence</h2>
@@ -1247,6 +1280,25 @@
   }
 
   // ---------------------------------------------------------------- réglages des prédictions
+
+  function savingsSettingsCard() {
+    const sc = savingsCats();
+    const list = (type) => {
+      const used = new Set(DEFAULT_CATS[type]);
+      state.entries.filter((e) => e.type === type && e.category).forEach((e) => used.add(e.category));
+      sc[type].forEach((c) => used.add(c));
+      return [...used].sort((a, b) => (sc[type].includes(b) - sc[type].includes(a)) || a.localeCompare(b)).map((c) => `
+        <label class="check"><input type="checkbox" data-savings-cat="${type}" value="${esc(c)}" ${sc[type].includes(c) ? 'checked' : ''}><span>${esc(c)}</span></label>`).join('');
+    };
+    return `
+      <div class="card" id="savings-settings">
+        <h2>Épargne (Livret A)</h2>
+        <p class="hint">Catégories qui correspondent à des mouvements entre votre compte courant et votre épargne.
+        Dans le Bilan, elles sont retirées des revenus et des dépenses et forment l'<b>épargne réelle</b> (versements − retraits).</p>
+        <details><summary>Versements vers l'épargne (dépenses) : ${sc.expense.map(esc).join(', ') || 'aucune'}</summary>${list('expense')}</details>
+        <details><summary>Retraits depuis l'épargne (revenus) : ${sc.income.map(esc).join(', ') || 'aucune'}</summary>${list('income')}</details>
+      </div>`;
+  }
 
   function trendSettingsCard() {
     const ex = trendExclude();
@@ -1484,6 +1536,12 @@
     },
     'cat-back': () => { ui.tab = (ui.cat && ui.cat.from) || 'history'; render(); window.scrollTo(0, 0); },
     'cat-year': (el) => { ui.cat.year += Number(el.dataset.d); render(); },
+    'goto-savings-settings': (el, ev) => {
+      if (ev) ev.preventDefault();
+      ui.tab = 'settings'; render();
+      const card = document.getElementById('savings-settings');
+      if (card) card.scrollIntoView({ block: 'start' });
+    },
     'goto-trend-settings': (el, ev) => {
       if (ev) ev.preventDefault();
       ui.tab = 'settings'; render();
@@ -1520,6 +1578,17 @@
   document.addEventListener('change', (ev) => {
     const el = ev.target;
     if (el.dataset.action === 'toggle-variable') handlers['toggle-variable'](el);
+    if (el.dataset.savingsCat) {
+      const sc = savingsCats();
+      const arr = sc[el.dataset.savingsCat];
+      const k = arr.indexOf(el.value);
+      if (el.checked && k < 0) arr.push(el.value);
+      if (!el.checked && k >= 0) arr.splice(k, 1);
+      state.settings.savingsCats = sc;
+      save();
+      const det = el.closest('details');
+      if (det) det.querySelector('summary').textContent = (el.dataset.savingsCat === 'expense' ? 'Versements vers l\'épargne (dépenses) : ' : 'Retraits depuis l\'épargne (revenus) : ') + (arr.join(', ') || 'aucune');
+    }
     if (el.dataset.trendEx) {
       const t = trendExclude();
       const list = t[el.dataset.trendEx];

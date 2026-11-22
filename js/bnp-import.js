@@ -329,6 +329,8 @@
 
     // Virement reçu de son propre compte (Livret A, LDDS…) : importé, mais exclu des prédictions de revenus.
     if (op.transfer === 'own' && !op.roundtrip && op.type === 'income') return { category: 'Virement depuis épargne', recurring: false, ignore: false };
+    // Virement émis vers son propre compte (Livret A…) : importé comme versement d'épargne (hors dépenses dans le bilan).
+    if (op.transfer === 'own' && !op.roundtrip && op.type === 'expense') return { category: 'Versement sur épargne', recurring, ignore: false };
     if (op.transfer === 'own') return { category: 'Virements internes', recurring: false, ignore: true };
     if (op.transfer === 'joint') return { category: 'Compte joint', recurring, ignore: false };
     if (op.type === 'income' && /LIVRET|\bLDDS?\b|\bLEP\b|EPARGNE/.test(text)) return { category: 'Virement depuis épargne', recurring: false, ignore: false };

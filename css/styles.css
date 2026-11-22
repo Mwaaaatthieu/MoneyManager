@@ -10,6 +10,7 @@
   --accent: #2a78d6;
   --income: #2a78d6;   /* série 1 */
   --expense: #eb6834;  /* série 2 */
+  --saving: #1baf7a;   /* série 3 */
   --good: #0a7d3c;
   --bad: #c62f2f;
   --grid: #e6e5e1;
@@ -29,6 +30,7 @@
     --accent: #3987e5;
     --income: #3987e5;
     --expense: #d95926;
+    --saving: #199e70;
     --good: #3ec27a;
     --bad: #f07171;
     --grid: #2c2c29;
@@ -46,6 +48,7 @@
   --accent: #3987e5;
   --income: #3987e5;
   --expense: #d95926;
+  --saving: #199e70;
   --good: #3ec27a;
   --bad: #f07171;
   --grid: #2c2c29;
@@ -104,6 +107,7 @@ main { padding: 0 16px 24px; max-width: 720px; margin: 0 auto; }
 .dot { width: 10px; height: 10px; border-radius: 3px; display: inline-block; flex: none; }
 .dot.income { background: var(--income); }
 .dot.expense { background: var(--expense); }
+.dot.saving { background: var(--saving); }
 .pos { color: var(--good); }
 .neg { color: var(--bad); }
 .num { font-variant-numeric: tabular-nums; white-space: nowrap; }
@@ -181,6 +185,7 @@ main { padding: 0 16px 24px; max-width: 720px; margin: 0 auto; }
 .chart .axis { stroke: var(--border); stroke-width: 1; }
 .chart .b-inc { fill: var(--income); }
 .chart .b-exp { fill: var(--expense); }
+.chart .b-saving { fill: var(--saving); }
 .chart .b-sav { fill: var(--income); }
 .chart .b-sav.negative { fill: var(--expense); }
 .chart .hit { fill: transparent; cursor: pointer; }

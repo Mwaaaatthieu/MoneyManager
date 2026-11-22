@@ -5,7 +5,9 @@ Application web installable sur téléphone (PWA) pour réduire la charge mental
 - **Mois** — saisie manuelle des revenus et dépenses, marquées *fixes* (récurrentes) ou *variables*.
   Un bouton reprend en un geste les lignes fixes du mois précédent. Solde, taux d'épargne, répartition par catégorie.
 - **Bilan** — 12 derniers mois en graphique + tableau, moyennes sur 6 mois (revenus, charges fixes / variables,
-  épargne, « reste à vivre »), dépenses moyennes par catégorie. Filtre de catégories (n'en afficher qu'une, ou en
+  épargne, « reste à vivre »), dépenses moyennes par catégorie. Les mouvements du Livret A (catégories
+  « Versement sur épargne » / « Virement depuis épargne », réglables) sont retirés des revenus et des dépenses et
+  forment une 3ᵉ barre : l'épargne réelle (versements − retraits). Filtre de catégories (n'en afficher qu'une, ou en
   retirer plusieurs). Toucher une catégorie ouvre toutes ses dépenses de l'année (total, moyenne, graphique par mois,
   détail des opérations, navigation d'une année à l'autre).
 - **Prédiction du mois en cours et du mois suivant** (onglet Mois) — revenus et dépenses prévus :

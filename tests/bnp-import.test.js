@@ -159,3 +159,18 @@ test('virement reçu de son propre compte (Livret A) : importé comme « Viremen
   assert.ok(back.roundtrip);
   assert.equal(B.suggest(back, {}).ignore, true);
 });
+
+test('virement émis vers son propre compte (Livret A) : importé comme « Versement sur épargne »', () => {
+  const items = [
+    ...line(810, [[268, 'du 01 février 2026 au 28 février 2026']]),
+    ...line(773, [[346, 'MME DUPONT CLAIRE']]),
+    ...header(729),
+    ...op(711, '03.02', 'VIR CPTE A CPTE EMIS /MOTIF LIVRET A', '03.02', '400,00', 'D'),
+    ...line(701, [[68, '/BEN MME DUPONT CLAIRE']]),
+    ...line(600, [[68, 'TOTAL DES OPERATIONS'], right(446, '400,00')]),
+  ];
+  const r = B.parseStatement([{ items }]);
+  assert.equal(r.operations.length, 1);
+  assert.equal(r.operations[0].transfer, 'own');
+  assert.deepEqual(B.suggest(r.operations[0], {}), { category: 'Versement sur épargne', recurring: false, ignore: false });
+});
