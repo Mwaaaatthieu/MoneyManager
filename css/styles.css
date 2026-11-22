@@ -219,3 +219,10 @@ details summary { cursor: pointer; color: var(--accent); font-size: .9rem; min-h
   max-width: calc(100% - 32px);
 }
 .empty { text-align: center; color: var(--muted); padding: 18px 8px; }
+
+.meter { height: 8px; border-radius: 4px; background: var(--surface-2); overflow: hidden; margin-top: 4px; }
+.meter > i { display: block; height: 100%; border-radius: 4px; }
+.meter > i.income { background: var(--income); }
+.meter > i.expense { background: var(--expense); }
+
+a { color: var(--accent); }

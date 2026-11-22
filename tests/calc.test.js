@@ -92,3 +92,106 @@ test('simulation : frais réels plus avantageux et régularisation', () => {
   assert.ok(sim.regularisation > 0 === (sim.impot > 1500));
   assert.ok(sim.tauxIdealArrondi >= sim.impot / 30000 * 100);
 });
+
+// ---------- prédiction mensuelle (tendances) ----------
+function history() {
+  const e = [];
+  const add = (month, type, label, category, amount, recurring) => e.push({ month, type, label, category, amount, recurring });
+  // 6 mois de référence : mai → octobre 2026 ; mois courant = décembre (novembre, le mois précédent, est ignoré)
+  ['2026-05', '2026-06', '2026-07', '2026-08', '2026-09', '2026-10'].forEach((m, i) => {
+    add(m, 'income', 'Salaire', 'Salaire', 3000, true);
+    add(m, 'expense', 'Loyer', 'Logement', i < 5 ? 800 : 850, true); // loyer augmenté en octobre
+    add(m, 'expense', 'Courses', 'Alimentation', 300 + i * 30, false); // tendance à la hausse : 300 → 450
+    add(m, 'expense', 'Vacances', 'Loisirs', i === 2 ? 1200 : 0, false);
+  });
+  add('2026-09', 'income', 'Virement Livret A', 'Autre revenu', 1000, false); // libellé seul : PAS exclu
+  add('2026-10', 'income', 'Virement de M. X', 'Virement depuis épargne', 500, false);
+  add('2026-10', 'income', 'Vente Vinted', 'Autre revenu', 60, false);
+  // mois précédent (novembre), incomplet : ne doit pas compter
+  add('2026-11', 'expense', 'Courses', 'Alimentation', 5000, false);
+  add('2026-11', 'income', 'Salaire', 'Salaire', 9999, true);
+  return e;
+}
+
+test('prédiction : lignes fixes au dernier montant connu', () => {
+  const p = C.predictMonth({ entries: history(), planned: [] }, '2026-12', '2026-12');
+  assert.equal(p.window.length, 6);
+  assert.equal(p.income.fixed, 3000);
+  assert.equal(p.expense.byCategory.Logement, 850);
+});
+
+test('prédiction : moyenne pondérée des variables (tendance)', () => {
+  const p = C.predictMonth({ entries: history(), planned: [] }, '2026-12', '2026-12');
+  // courses : Σ(i+1)(300+30i)/21 = 8400/21 = 400 > moyenne simple 375
+  assert.equal(p.expense.byCategory.Alimentation, 400);
+  // vacances de juillet (poids 3/21)
+  assert.equal(p.expense.byCategory.Loisirs, 171.43);
+});
+
+test('prédiction : le mois précédent celui en cours est ignoré', () => {
+  const p = C.predictMonth({ entries: history(), planned: [] }, '2026-12', '2026-12');
+  assert.deepEqual(p.window, ['2026-05', '2026-06', '2026-07', '2026-08', '2026-09', '2026-10']);
+  assert.equal(p.skippedMonth, '2026-11');
+  assert.equal(p.income.fixed, 3000);
+});
+
+test('prédiction : revenus ignorés uniquement selon la liste de catégories', () => {
+  const ex = { income: [C.SAVINGS_CATEGORY] };
+  const p = C.predictMonth({ entries: history(), planned: [] }, '2026-12', '2026-12', { exclude: ex });
+  // « Virement Livret A » classé en Autre revenu reste compté (pas de détection par libellé) :
+  // 1000×5/21 + 60×6/21 = 255,24 ; le virement en catégorie « Virement depuis épargne » est exclu
+  assert.equal(p.income.variable, 255.24);
+  assert.equal(p.excluded.count, 1);
+  const all = C.predictMonth({ entries: history(), planned: [] }, '2026-12', '2026-12', { exclude: { income: [C.SAVINGS_CATEGORY, 'Autre revenu'] } });
+  assert.equal(all.income.variable, 0);
+});
+
+test('prédiction : catégories de dépenses exclues et charges programmées', () => {
+  const state = { entries: history(), planned: [{ month: '2026-12', type: 'expense', label: 'Taxe', category: 'Impôts & taxes', amount: 900 }] };
+  const p = C.predictMonth(state, '2026-12', '2026-12', { exclude: { expense: ['Loisirs'] } });
+  assert.equal(p.expense.byCategory.Loisirs, undefined);
+  assert.equal(p.expense.planned, 900);
+  assert.equal(p.expense.total, 850 + 400 + 900);
+  assert.equal(p.balance, C.round2(p.income.total - p.expense.total));
+});
+
+test('prévisions 12 mois : mêmes exclusions que la prédiction mensuelle', () => {
+  const f = C.forecast({ entries: history(), planned: [] }, '2026-12', 2, { includeVariable: true, exclude: { expense: ['Loisirs'] } });
+  const p = C.predictMonth({ entries: history(), planned: [] }, '2026-12', '2026-12', { exclude: { expense: ['Loisirs'] } });
+  assert.equal(f.rows[0].savings, p.balance);
+});
+
+// ---------- frais de repas ----------
+test('repas : valeur du repas au foyer selon l\'année, modifiable', () => {
+  assert.equal(C.repasFoyer(2024, P), 5.35);
+  assert.equal(C.repasFoyer(2026, P), 5.5);
+  assert.equal(C.repasFoyer(2031, P), 5.5); // année future : dernière valeur connue
+  assert.equal(C.repasFoyer(2026, { ...P, repasForfait: 5.6 }), 5.6);
+});
+
+test('repas préparés à domicile sans justificatif : forfait par repas', () => {
+  const fr = C.fraisReels({ nbRepasMaison: 218 }, { ...P, year: 2026 });
+  assert.equal(fr.repas, 1199); // 218 × 5,50
+  assert.equal(fr.repasDetail.maison.parRepas, 5.5);
+});
+
+test('repas achetés avec justificatifs : (prix − valeur au foyer − part employeur), prix plafonné', () => {
+  const p26 = { ...P, year: 2026 };
+  assert.equal(C.fraisReels({ nbRepas: 218, coutRepas: 12 }, p26).repas, 1417); // 218 × 6,50
+  assert.equal(C.fraisReels({ nbRepas: 100, coutRepas: 12, partEmployeur: 4.5 }, p26).repas, 200); // 100 × 2,00
+  const cher = C.fraisReels({ nbRepas: 10, coutRepas: 30 }, p26);
+  assert.ok(cher.repasDetail.achetes.plafonne);
+  assert.equal(cher.repas, C.round2(10 * (20.70 - 5.5)));
+});
+
+test('repas : prix saisi trop bas signalé (le cas des 33 €)', () => {
+  const fr = C.fraisReels({ nbRepas: 218, coutRepas: 5.5 }, { ...P, year: 2026 });
+  assert.equal(fr.repas, 0);
+  assert.ok(fr.repasDetail.prixTropBas);
+});
+
+test('repas : les deux types se cumulent et la simulation utilise l\'année', () => {
+  const sim = C.simulateTax({ year: 2026, couple: false, parts: 1,
+    declarants: [{ netImposable: 30000, frais: { nbRepasMaison: 150, nbRepas: 68, coutRepas: 12 } }] });
+  assert.equal(sim.declarants[0].fraisReels.repas, C.round2(150 * 5.5 + 68 * 6.5));
+});

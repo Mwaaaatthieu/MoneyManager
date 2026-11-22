@@ -8,7 +8,7 @@
     expense: ['Logement', 'Alimentation', 'Transport', 'Énergie', 'Assurances', 'Abonnements', 'Santé',
       'Loisirs', 'Restaurants & sorties', 'Shopping', 'Enfants', 'Impôts & taxes', 'Crédit', 'Cadeaux',
       'Frais bancaires', 'Retraits d\'espèces', 'Virements', 'Compte joint', 'Virements internes', 'Autre'],
-    income: ['Salaire', 'Prime', 'Allocations', 'Remboursement', 'Revenus locatifs', 'Autre revenu'],
+    income: ['Salaire', 'Prime', 'Allocations', 'Remboursement', 'Revenus locatifs', 'Virement depuis épargne', 'Autre revenu'],
   };
 
   // ---------------------------------------------------------------- état
@@ -16,7 +16,7 @@
   function blankDeclarant() {
     return {
       netImposable: '', forceMode: 'auto',
-      frais: { cv: 5, electric: false, kmJour: '', joursTrajet: '', kmAutres: '', nbRepas: '', coutRepas: '',
+      frais: { cv: 5, electric: false, kmJour: '', joursTrajet: '', kmAutres: '', nbRepasMaison: '', nbRepas: '', coutRepas: '', partEmployeur: '',
         joursTeletravail: '', autres: [] },
     };
   }
@@ -28,7 +28,7 @@
     };
   }
   function defaultState() {
-    return { version: 1, entries: [], planned: [], importRules: {}, settings: { includeVariable: true, theme: 'auto' }, tax: defaultTax() };
+    return { version: 1, entries: [], planned: [], payslips: [], importRules: {}, settings: { includeVariable: true, theme: 'auto', trendExclude: { expense: [], income: ['Virement depuis épargne'] }, trendDefaultsV2: true }, tax: defaultTax() };
   }
   function load() {
     try {
@@ -36,15 +36,29 @@
       if (!raw) return defaultState();
       const s = JSON.parse(raw);
       const d = defaultState();
+      const settings = { ...d.settings, ...(s.settings || {}) };
+      // Migration (v1.4) : l'épargne n'est plus détectée par le libellé mais par une catégorie ignorée par défaut.
+      if (!(s.settings && s.settings.trendDefaultsV2)) {
+        const t = settings.trendExclude || { expense: [], income: [] };
+        t.income = t.income || [];
+        if (!t.income.includes('Virement depuis épargne')) t.income.push('Virement depuis épargne');
+        settings.trendExclude = t;
+        settings.trendDefaultsV2 = true;
+      }
       return {
         ...d, ...s,
-        settings: { ...d.settings, ...(s.settings || {}) },
-        tax: { ...d.tax, ...(s.tax || {}), params: { ...d.tax.params, ...((s.tax || {}).params || {}) } },
+        settings,
+        tax: migrateTax({ ...d.tax, ...(s.tax || {}), params: { ...d.tax.params, ...((s.tax || {}).params || {}) } }),
       };
     } catch (e) {
       console.error(e);
       return defaultState();
     }
+  }
+  /** v1.6 : la valeur du repas au foyer dépend de l'année ; l'ancienne valeur par défaut figée (5,35 €) est retirée. */
+  function migrateTax(tax) {
+    if (tax.params && Number(tax.params.repasForfait) === 5.35) tax.params.repasForfait = null;
+    return tax;
   }
   let state = load();
   function save() {
@@ -205,6 +219,8 @@
           <div class="sub">Taux d'épargne : ${pct(s.savingsRate)}</div></div>
       </div>
 
+      ${predictionCard(m, s)}
+
       <div class="row" style="margin-top:10px">
         <button class="btn small" data-action="open-import">📄 Importer un relevé PDF</button>
         ${imported ? `<span class="hint" style="align-self:center">${imported} ligne(s) importée(s)</span>` : ''}
@@ -240,65 +256,279 @@
       <div class="card">
         <h2>Répartition des dépenses</h2>
         <ul class="list">${cats.map(([c, v]) => `
-          <li><div class="grow"><div class="kv" style="padding:0"><span>${esc(c)}</span><span class="num">${eur0(v)} · ${pct(v / s.expense, 0)}</span></div>
+          <li class="tap" data-action="open-category" data-cat="${esc(c)}" data-year="${m.slice(0, 4)}"><div class="grow"><div class="kv" style="padding:0"><span>${esc(c)}</span><span class="num">${eur0(v)} · ${pct(v / s.expense, 0)} ›</span></div>
           <div class="bar-h" style="width:${Math.max(2, (v / maxCat) * 100)}%"></div></div></li>`).join('')}</ul>
       </div>` : ''}
 
       <button class="fab" data-action="new-entry" aria-label="Ajouter une ligne">+</button>`;
   }
 
+  // ---------------------------------------------------------------- prédiction (mois en cours / suivant)
+
+  function trendExclude() {
+    const t = state.settings.trendExclude || {};
+    return { expense: t.expense || [], income: t.income || [] };
+  }
+
+  function meter(done, total, type) {
+    const ratio = total > 0 ? Math.min(1, done / total) : (done > 0 ? 1 : 0);
+    return `<div class="meter" role="img" aria-label="${Math.round(ratio * 100)} %"><i class="${type}" style="width:${(ratio * 100).toFixed(1)}%"></i></div>`;
+  }
+
+  function predictionCard(m, actualSummary) {
+    const cur = C.monthKey();
+    const next = C.addMonths(cur, 1);
+    if (m !== cur && m !== next) return '';
+    const ex = trendExclude();
+    const p = C.predictMonth(state, cur, m, { exclude: ex });
+    const title = m === cur ? 'Prévision du mois en cours' : 'Prévision du mois prochain';
+    if (!p.window.length) {
+      return `<div class="card"><h2>🔮 ${title}</h2><p class="hint">Pas encore assez d'historique : la prédiction utilise les mois antérieurs à ${monthLabel(p.skippedMonth)}
+        (ce dernier est ignoré car il peut être incomplet). Saisissez ou importez des mois plus anciens.</p></div>`;
+    }
+    const nEx = ex.expense.length + ex.income.length;
+    const basis = `Basé sur ${p.window.length} mois (${p.window.map(monthShort).join(', ')}) : charges fixes au dernier montant connu,
+      variables en moyenne pondérée (les mois récents comptent davantage)${p.plannedItems.length ? ', + charges programmées' : ''}.
+      ${monthLabel(p.skippedMonth)} est ignoré (peut-être incomplet)${nEx ? ` · ${nEx} catégorie(s) ignorée(s)` : ''}.`;
+    const cats = Object.entries(p.expense.byCategory).sort((a, b) => b[1] - a[1]);
+
+    let body;
+    if (m === cur) {
+      // Réel du mois, avec les mêmes exclusions que la prédiction pour comparer ce qui est comparable.
+      const list = state.entries.filter((e) => e.month === m && !C.isTrendExcluded(e, ex));
+      const inc = list.filter((e) => e.type === 'income').reduce((a, e) => a + e.amount, 0);
+      const exp = list.filter((e) => e.type === 'expense').reduce((a, e) => a + e.amount, 0);
+      const restInc = Math.max(0, p.income.total - inc);
+      const restExp = Math.max(0, p.expense.total - exp);
+      const endBalance = inc + restInc - exp - restExp;
+      const seen = new Set(state.entries.filter((e) => e.month === m).map((e) => e.label.trim().toLowerCase()));
+      const pending = p.recurringLines.filter((l) => l.type === 'expense' && !seen.has(l.label.trim().toLowerCase()));
+      body = `
+        <div class="kv"><span><i class="dot income"></i> Revenus : ${eur0(inc)} perçus</span><span class="num">sur ${eur0(p.income.total)} prévus</span></div>
+        ${meter(inc, p.income.total, 'income')}
+        <div class="kv" style="margin-top:8px"><span><i class="dot expense"></i> Dépenses : ${eur0(exp)} réalisées</span><span class="num">sur ${eur0(p.expense.total)} prévues</span></div>
+        ${meter(exp, p.expense.total, 'expense')}
+        ${exp > p.expense.total ? `<p class="hint neg">Dépassement de ${eur0(exp - p.expense.total)} par rapport à la prévision.</p>` : ''}
+        <div class="kv total" style="margin-top:8px"><span>Solde estimé en fin de mois</span><span class="num ${cls(endBalance)}">${signed(Math.round(endBalance))}</span></div>
+        <p class="hint">Prévu initialement : ${signed(Math.round(p.balance))} · reste attendu : +${eur0(restInc)} / −${eur0(restExp)}</p>
+        ${pending.length ? `<h3>Charges fixes attendues, pas encore passées</h3>
+          <ul class="list">${pending.slice(0, 6).map((l) => `<li><div class="grow"><div class="title">${esc(l.label)}</div><div class="meta">${esc(l.category || '')}</div></div><span class="num">−${eur(l.amount)}</span></li>`).join('')}</ul>
+          ${pending.length > 6 ? `<p class="hint">… et ${pending.length - 6} autre(s).</p>` : ''}` : ''}`;
+    } else {
+      body = `
+        <div class="kv"><span><i class="dot income"></i> Revenus prévus</span><span class="num">${eur0(p.income.total)}</span></div>
+        <p class="hint" style="margin-top:0">fixes ${eur0(p.income.fixed)} · variables ${eur0(p.income.variable)}${p.income.planned ? ` · programmés ${eur0(p.income.planned)}` : ''}</p>
+        <div class="kv"><span><i class="dot expense"></i> Dépenses prévues</span><span class="num">${eur0(p.expense.total)}</span></div>
+        <p class="hint" style="margin-top:0">fixes ${eur0(p.expense.fixed)} · variables ${eur0(p.expense.variable)}${p.expense.planned ? ` · programmées ${eur0(p.expense.planned)}` : ''}</p>
+        <div class="kv total"><span>Épargne prévue</span><span class="num ${cls(p.balance)}">${signed(Math.round(p.balance))}</span></div>`;
+    }
+    return `
+      <div class="card">
+        <h2>🔮 ${title}</h2>
+        ${body}
+        ${cats.length ? `<details><summary>Dépenses prévues par catégorie</summary><ul class="list">${cats.map(([c, v]) => `
+          <li><div class="grow"><div class="kv" style="padding:0"><span>${esc(c)}</span><span class="num">${eur0(v)}</span></div>
+          <div class="bar-h" style="width:${Math.max(2, (v / cats[0][1]) * 100)}%"></div></div></li>`).join('')}</ul></details>` : ''}
+        <p class="hint">${basis} <a href="#" data-action="goto-trend-settings">Régler</a></p>
+      </div>`;
+  }
+
   // ---------------------------------------------------------------- vue : Bilan
+
+  function historyHidden() { return state.settings.historyHidden || []; }
+
+  /** Catégories de dépenses utilisées, triées par montant sur les 12 derniers mois. */
+  function expenseCategoriesByTotal() {
+    const since = C.addMonths(C.monthKey(), -11);
+    const tot = {};
+    state.entries.filter((e) => e.type === 'expense').forEach((e) => {
+      const c = e.category || 'Autre';
+      if (!(c in tot)) tot[c] = 0;
+      if (e.month >= since) tot[c] += e.amount;
+    });
+    historyHidden().forEach((c) => { if (!(c in tot)) tot[c] = 0; });
+    return Object.entries(tot).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  }
 
   function viewHistory() {
     const cur = C.monthKey();
     const months = [];
     for (let i = 11; i >= 0; i--) months.push(C.addMonths(cur, -i));
-    const rows = months.map((m) => C.monthSummary(state.entries, m));
-    const withData = rows.filter((r) => r.count > 0);
-    const win = C.referenceWindow(state.entries, cur, 6);
-    const avg = C.averages(state.entries, win);
-    const avgInc = avg.recIncome + avg.varIncome;
-    const avgExp = avg.recExpense + avg.varExpense;
-
-    // catégories moyennes sur la fenêtre
-    const catTotals = {};
-    state.entries.filter((e) => e.type === 'expense' && win.includes(e.month))
-      .forEach((e) => { catTotals[e.category] = (catTotals[e.category] || 0) + e.amount; });
-    const cats = Object.entries(catTotals).map(([c, v]) => [c, v / (win.length || 1)]).sort((a, b) => b[1] - a[1]);
-
-    if (!withData.length) {
+    if (!state.entries.length) {
       return `<div class="card empty">Pas encore de données. Saisissez vos revenus et dépenses dans l'onglet « Mois »,
         ou chargez des données d'exemple depuis « Réglages ».</div>`;
     }
 
-    const chart = barChart('hist', rows, [
-      { key: 'income', cls: 'b-inc', label: 'Revenus' },
-      { key: 'expense', cls: 'b-exp', label: 'Dépenses' },
-    ], (r) => `<b>${monthLabel(r.month)}</b>${tipRow('income', 'Revenus', eur0(r.income))}${tipRow('expense', 'Dépenses', eur0(r.expense))}${tipRow('', 'Solde', `<span class="${cls(r.balance)}">${signed(Math.round(r.balance))}</span>`)}`,
-    { label: 'Revenus et dépenses des 12 derniers mois' });
+    // Filtre de catégories (dépenses) : les catégories masquées sont retirées de tous les chiffres de la page.
+    const hidden = new Set(historyHidden());
+    const allCats = expenseCategoriesByTotal();
+    const shownCats = allCats.filter(([c]) => !hidden.has(c));
+    const filtered = hidden.size > 0;
+    const entries = state.entries.filter((e) => e.type === 'income' || !hidden.has(e.category || 'Autre'));
 
-    return `
-      <p class="hint">Moyennes calculées sur ${win.length} mois : ${win.map(monthShort).join(', ') || '—'} (mois en cours exclu).</p>
+    const rows = months.map((m) => C.monthSummary(entries, m));
+    const win = C.referenceWindow(state.entries, cur, 6);
+    const avg = C.averages(entries, win);
+    const avgInc = avg.recIncome + avg.varIncome;
+    const avgExp = avg.recExpense + avg.varExpense;
+
+    const catTotals = {};
+    entries.filter((e) => e.type === 'expense' && win.includes(e.month))
+      .forEach((e) => { const c = e.category || 'Autre'; catTotals[c] = (catTotals[c] || 0) + e.amount; });
+    const cats = Object.entries(catTotals).map(([c, v]) => [c, v / (win.length || 1)]).sort((a, b) => b[1] - a[1]);
+
+    const filterLabel = !filtered ? 'toutes'
+      : shownCats.length === 1 ? esc(shownCats[0][0])
+        : `${shownCats.length} sur ${allCats.length}`;
+    const filterBar = `
+      <div class="row" style="align-items:center;margin:4px 0 10px">
+        <button class="btn small" data-action="hist-filter" aria-haspopup="dialog">Catégories : <b>${filterLabel}</b> ▾</button>
+        ${filtered ? '<button class="btn small" data-action="hist-filter-reset">Tout afficher</button>' : ''}
+      </div>`;
+
+    const series = filtered
+      ? [{ key: 'expense', cls: 'b-exp', label: 'Dépenses' }]
+      : [{ key: 'income', cls: 'b-inc', label: 'Revenus' }, { key: 'expense', cls: 'b-exp', label: 'Dépenses' }];
+    const chart = barChart('hist', rows, series, (r) => `<b>${monthLabel(r.month)}</b>${filtered ? ''
+      : tipRow('income', 'Revenus', eur0(r.income))}${tipRow('expense', filtered ? 'Dépenses filtrées' : 'Dépenses', eur0(r.expense))}${filtered ? ''
+      : tipRow('', 'Solde', `<span class="${cls(r.balance)}">${signed(Math.round(r.balance))}</span>`)}`,
+    { label: filtered ? 'Dépenses filtrées des 12 derniers mois' : 'Revenus et dépenses des 12 derniers mois' });
+
+    const stats = filtered ? `
+      <div class="stats">
+        <div class="stat wide"><div class="lbl"><i class="dot expense"></i>Dépenses moyennes · ${filterLabel}</div><div class="val num">${eur0(avgExp)}</div>
+          <div class="sub">fixes ${eur0(avg.recExpense)} · variables ${eur0(avg.varExpense)} · ${pct(avgInc > 0 ? avgExp / avgInc : null, 0)} des revenus moyens</div></div>
+      </div>` : `
       <div class="stats">
         <div class="stat"><div class="lbl"><i class="dot income"></i>Revenus moyens</div><div class="val num">${eur0(avgInc)}</div><div class="sub">dont fixes ${eur0(avg.recIncome)}</div></div>
         <div class="stat"><div class="lbl"><i class="dot expense"></i>Dépenses moyennes</div><div class="val num">${eur0(avgExp)}</div><div class="sub">fixes ${eur0(avg.recExpense)} · var. ${eur0(avg.varExpense)}</div></div>
         <div class="stat wide"><div class="lbl">Épargne moyenne / mois</div><div class="val num ${cls(avgInc - avgExp)}">${signed(Math.round(avgInc - avgExp))}</div>
           <div class="sub">Taux d'épargne moyen : ${pct(avgInc > 0 ? (avgInc - avgExp) / avgInc : null)} · « reste à vivre » après charges fixes : ${eur0(avg.recIncome - avg.recExpense)}</div></div>
-      </div>
+      </div>`;
+
+    return `
+      ${filterBar}
+      <p class="hint">Moyennes calculées sur ${win.length} mois : ${win.map(monthShort).join(', ') || '—'} (mois en cours exclu).</p>
+      ${stats}
 
       <div class="card">
         <h2>12 derniers mois</h2>
-        <div class="legend"><span><i class="dot income"></i>Revenus</span><span><i class="dot expense"></i>Dépenses</span></div>
+        ${filtered ? '' : '<div class="legend"><span><i class="dot income"></i>Revenus</span><span><i class="dot expense"></i>Dépenses</span></div>'}
         ${chart}
         <details><summary>Voir le tableau</summary>
-          <div class="scroll-x"><table class="data"><thead><tr><th>Mois</th><th>Revenus</th><th>Dépenses</th><th>Solde</th><th>Taux</th></tr></thead><tbody>
-          ${rows.slice().reverse().filter((r) => r.count).map((r) => `<tr><td>${monthLabel(r.month)}</td><td class="num">${eur0(r.income)}</td><td class="num">${eur0(r.expense)}</td><td class="num ${cls(r.balance)}">${signed(Math.round(r.balance))}</td><td class="num">${pct(r.savingsRate, 0)}</td></tr>`).join('')}
+          <div class="scroll-x"><table class="data"><thead><tr><th>Mois</th>${filtered ? '<th>Dépenses</th>' : '<th>Revenus</th><th>Dépenses</th><th>Solde</th><th>Taux</th>'}</tr></thead><tbody>
+          ${rows.slice().reverse().filter((r) => r.count).map((r) => `<tr><td>${monthLabel(r.month)}</td>${filtered ? `<td class="num">${eur0(r.expense)}</td>`
+    : `<td class="num">${eur0(r.income)}</td><td class="num">${eur0(r.expense)}</td><td class="num ${cls(r.balance)}">${signed(Math.round(r.balance))}</td><td class="num">${pct(r.savingsRate, 0)}</td>`}</tr>`).join('')}
           </tbody></table></div></details>
       </div>
 
-      ${cats.length ? `<div class="card"><h2>Dépenses moyennes par catégorie</h2>
-        <ul class="list">${cats.map(([c, v]) => `<li><div class="grow"><div class="kv" style="padding:0"><span>${esc(c)}</span><span class="num">${eur0(v)} / mois</span></div>
-        <div class="bar-h" style="width:${Math.max(2, (v / cats[0][1]) * 100)}%"></div></div></li>`).join('')}</ul></div>` : ''}`;
+      <div class="card"><h2>Dépenses moyennes par catégorie</h2>
+        ${cats.length ? `<p class="hint">Touchez une catégorie pour voir toutes ses dépenses de l'année.</p>
+        <ul class="list">${cats.map(([c, v]) => `<li class="tap" data-action="open-category" data-cat="${esc(c)}"><div class="grow"><div class="kv" style="padding:0"><span>${esc(c)}</span><span class="num">${eur0(v)} / mois ›</span></div>
+        <div class="bar-h" style="width:${Math.max(2, (v / cats[0][1]) * 100)}%"></div></div></li>`).join('')}</ul>`
+    : '<p class="hint">Aucune dépense sur la période pour les catégories affichées.</p>'}
+      </div>`;
+  }
+
+  function openHistoryFilter() {
+    const all = expenseCategoriesByTotal();
+    const hidden = new Set(historyHidden());
+    sheet().innerHTML = `
+      <form method="dialog">
+        <h2>Catégories affichées</h2>
+        <p class="hint">Décochez les catégories à retirer du bilan, ou touchez « seule » pour n'afficher qu'une catégorie.</p>
+        <div class="row" style="margin:8px 0">
+          <button type="button" class="btn small" data-hf="all">Tout cocher</button>
+          <button type="button" class="btn small" data-hf="none">Tout décocher</button>
+        </div>
+        <ul class="list" style="max-height:48vh;overflow:auto">${all.map(([c, v]) => `
+          <li><label class="check grow" style="min-height:40px"><input type="checkbox" value="${esc(c)}" ${hidden.has(c) ? '' : 'checked'}>
+            <span>${esc(c)}<br><span class="hint" style="margin:0">${eur0(v)} sur 12 mois</span></span></label>
+            <button type="button" class="btn small" data-hf-only="${esc(c)}">seule</button></li>`).join('')}</ul>
+        <p class="hint neg" id="hf-status"></p>
+        <div class="row" style="margin-top:8px">
+          <button type="button" class="btn" data-hf="cancel">Annuler</button>
+          <button type="button" class="btn primary" data-hf="apply">Appliquer</button>
+        </div>
+      </form>`;
+    const boxes = () => [...sheet().querySelectorAll('input[type=checkbox]')];
+    const apply = () => {
+      const unchecked = boxes().filter((b) => !b.checked).map((b) => b.value);
+      if (unchecked.length === boxes().length) { sheet().querySelector('#hf-status').textContent = 'Choisissez au moins une catégorie.'; return; }
+      state.settings.historyHidden = unchecked;
+      save(); sheet().close(); render();
+    };
+    sheet().querySelectorAll('[data-hf]').forEach((b) => b.addEventListener('click', () => {
+      const a = b.dataset.hf;
+      if (a === 'all' || a === 'none') boxes().forEach((x) => { x.checked = a === 'all'; });
+      if (a === 'cancel') sheet().close();
+      if (a === 'apply') apply();
+    }));
+    sheet().querySelectorAll('[data-hf-only]').forEach((b) => b.addEventListener('click', () => {
+      boxes().forEach((x) => { x.checked = x.value === b.dataset.hfOnly; });
+      apply();
+    }));
+    sheet().showModal();
+  }
+
+  // ---------------------------------------------------------------- vue : détail d'une catégorie
+
+  function viewCategory() {
+    const { name, year } = ui.cat;
+    const cur = C.monthKey();
+    const curYear = Number(cur.slice(0, 4));
+    const months = [];
+    for (let m = 1; m <= 12; m++) months.push(`${year}-${String(m).padStart(2, '0')}`);
+    const inCat = (e) => e.type === 'expense' && (e.category || 'Autre') === name;
+    const list = state.entries.filter((e) => inCat(e) && e.month.startsWith(year + '-'));
+    const rows = months.map((m) => ({ month: m, amount: C.round2(list.filter((e) => e.month === m).reduce((a, e) => a + e.amount, 0)) }));
+    const total = list.reduce((a, e) => a + e.amount, 0);
+    const allExp = state.entries.filter((e) => e.type === 'expense' && e.month.startsWith(year + '-')).reduce((a, e) => a + e.amount, 0);
+    // Moyenne sur les mois couverts par vos données cette année (du premier mois saisi au mois en cours / décembre).
+    const yearMonths = state.entries.map((e) => e.month).filter((m) => m.startsWith(year + '-')).sort();
+    const firstM = yearMonths.length ? Number(yearMonths[0].slice(5, 7)) : 1;
+    const lastM = year === curYear ? Number(cur.slice(5, 7)) : 12;
+    const elapsed = Math.max(1, lastM - firstM + 1);
+    const hasPrev = state.entries.some((e) => inCat(e) && e.month < `${year}-01`);
+    const hasNext = year < curYear || state.entries.some((e) => inCat(e) && e.month > `${year}-12`);
+
+    const chart = barChart('cat', rows, [{ key: 'amount', cls: 'b-exp', label: name }],
+      (r) => `<b>${monthLabel(r.month)}</b>${tipRow('expense', esc(name), eur(r.amount))}`, { label: `Dépenses ${name} par mois en ${year}` });
+
+    const byMonth = months.slice().reverse().filter((m) => rows.find((r) => r.month === m).amount > 0);
+    return `
+      <div class="row" style="align-items:center;justify-content:space-between">
+        <button class="btn small" data-action="cat-back">‹ Bilan</button>
+        <div class="monthnav" style="gap:6px;margin:0">
+          <button class="iconbtn" data-action="cat-year" data-d="-1" aria-label="Année précédente" ${hasPrev ? '' : 'disabled style="opacity:.35"'}>‹</button>
+          <strong>${year}</strong>
+          <button class="iconbtn" data-action="cat-year" data-d="1" aria-label="Année suivante" ${hasNext ? '' : 'disabled style="opacity:.35"'}>›</button>
+        </div>
+      </div>
+
+      <div class="stats" style="margin-top:12px">
+        <div class="stat"><div class="lbl"><i class="dot expense"></i>Total ${year}</div><div class="val num">${eur0(total)}</div>
+          <div class="sub">${list.length} opération(s)</div></div>
+        <div class="stat"><div class="lbl">Moyenne / mois</div><div class="val num">${eur0(total / elapsed)}</div>
+          <div class="sub">sur ${elapsed} mois · ${pct(allExp > 0 ? total / allExp : null, 0)} des dépenses</div></div>
+      </div>
+
+      <div class="card">
+        <h2>Par mois</h2>
+        ${chart}
+      </div>
+
+      ${byMonth.length ? byMonth.map((m) => {
+    const items = list.filter((e) => e.month === m).sort((a, b) => (b.date || '').localeCompare(a.date || '') || b.amount - a.amount);
+    return `<div class="card">
+          <div class="kv" style="padding:0 0 4px"><h2 style="margin:0;text-transform:capitalize">${monthLabel(m)}</h2><span class="num"><b>${eur(rows.find((r) => r.month === m).amount)}</b></span></div>
+          <ul class="list">${items.map((e) => `
+            <li class="tap" data-action="edit-entry" data-id="${e.id}"><div class="grow">
+              <div class="title">${esc(e.label)}${e.recurring ? '<span class="tag">fixe</span>' : ''}</div>
+              <div class="meta">${e.date ? e.date.slice(8, 10) + '/' + e.date.slice(5, 7) : monthShort(e.month)}</div></div>
+              <span class="num">−${eur(e.amount)}</span></li>`).join('')}</ul>
+        </div>`;
+  }).join('') : `<div class="card empty">Aucune dépense « ${esc(name)} » en ${year}.</div>`}`;
   }
 
   // ---------------------------------------------------------------- vue : Prévisions
@@ -306,7 +536,7 @@
   function viewForecast() {
     const cur = C.monthKey();
     const inc = state.settings.includeVariable;
-    const f = C.forecast(state, cur, 12, { includeVariable: inc });
+    const f = C.forecast(state, cur, 12, { includeVariable: inc, exclude: trendExclude() });
     const prov = C.provisions(state.planned, cur);
     const total = f.rows[f.rows.length - 1].cumulative;
     const upcoming = state.planned.filter((p) => p.month >= cur).sort((a, b) => a.month.localeCompare(b.month));
@@ -320,9 +550,9 @@
 
     return `
       ${noData ? '<div class="card hint">Aucun historique : la prévision ne repose que sur les charges programmées. Saisissez quelques mois pour une estimation réaliste.</div>'
-    : `<p class="hint">Projection basée sur la moyenne de ${f.window.length} mois (${f.window.map(monthShort).join(', ')}) + vos charges programmées.</p>`}
+    : `<p class="hint">Projection basée sur ${f.window.length} mois (${f.window.map(monthShort).join(', ')}) : fixes au dernier montant, variables en moyenne pondérée, + charges programmées. ${monthLabel(C.addMonths(cur, -1))} ignoré (peut-être incomplet) ; catégories ignorées exclues (<a href="#" data-action="goto-trend-settings">régler</a>).</p>`}
       <label class="check card" style="margin-top:8px"><input type="checkbox" data-action="toggle-variable" ${inc ? 'checked' : ''}>
-        <span>Inclure la moyenne des dépenses <b>variables</b> (${eur0(f.averages.varExpense)}/mois)<br><span class="hint">Recommandé : sinon seules les charges fixes sont prises en compte.</span></span></label>
+        <span>Inclure les dépenses <b>variables</b> (${eur0(f.averages.varExpense)}/mois)<br><span class="hint">Recommandé : sinon seules les charges fixes sont prises en compte.</span></span></label>
 
       <div class="stats">
         <div class="stat"><div class="lbl">Épargne prévue ce mois</div><div class="val num ${cls(f.rows[0].savings)}">${signed(Math.round(f.rows[0].savings))}</div></div>
@@ -381,8 +611,9 @@
           ${inputField('Taux de prélèvement actuel (%)', 'tax.tauxPAS', t.tauxPAS, { ph: 'ex. 7,5' })}
         </div>
         ${inputField('Autres revenus imposables nets (€/an)', 'tax.autresRevenus', t.autresRevenus)}
-        ${inputField('Total déjà prélevé sur l\'année (€) — facultatif', 'tax.dejaPreleve', t.dejaPreleve, { ph: 'vide = calcul avec le taux' })}
-        <p class="hint">Sans montant prélevé, l'outil suppose que votre taux actuel s'applique toute l'année.</p>
+        ${inputField('Total prélevé à la source sur l\'année (€) — facultatif', 'tax.dejaPreleve', t.dejaPreleve, { ph: 'vide = calcul avec le taux' })}
+        <p class="hint">Rempli automatiquement par l'import de vos bulletins de salaire (cumul projeté jusqu'en décembre).
+        Sans montant, l'outil suppose que votre taux actuel s'applique toute l'année.</p>
       </div>
       ${decl.map((i) => declarantForm(i)).join('')}
       <div id="tax-results">${taxResults()}</div>
@@ -397,8 +628,7 @@
       <div class="card">
         <h2>${T().couple ? `Déclarant ${i + 1}` : 'Vos revenus'}</h2>
         ${inputField('Salaire net imposable annuel (€)', p + '.netImposable', d.netImposable)}
-        <button class="btn small" data-action="estimate-salary" data-i="${i}">Estimer depuis mes saisies « Salaire »</button>
-        <p class="hint">Le net imposable figure sur la fiche de paie de décembre (cumul annuel). Il est un peu supérieur au net versé.</p>
+        ${payslipBlock(i)}
 
         <h3>Frais réels — trajets domicile-travail</h3>
         <div class="grid2">
@@ -412,11 +642,17 @@
         ${inputField('Autres km professionnels / an', p + '.frais.kmAutres', f.kmAutres)}
         <p class="hint">Au-delà de 40 km aller, seuls 40 km sont admis sauf justification.</p>
 
-        <h3>Repas et télétravail</h3>
+        <h3>Repas sur le lieu de travail</h3>
+        <p class="hint">Déductibles si vous ne pouvez pas rentrer déjeuner chez vous (distance, horaires).</p>
+        ${inputField('Repas préparés à domicile, sans justificatif (nombre / an)', p + '.frais.nbRepasMaison', f.nbRepasMaison, { ph: 'ex. 218' })}
         <div class="grid2">
-          ${inputField('Repas pris hors domicile / an', p + '.frais.nbRepas', f.nbRepas)}
-          ${inputField('Coût moyen d\'un repas (€)', p + '.frais.coutRepas', f.coutRepas)}
+          ${inputField('Repas achetés, avec justificatifs (nombre / an)', p + '.frais.nbRepas', f.nbRepas)}
+          ${inputField('Prix moyen que vous payez par repas (€)', p + '.frais.coutRepas', f.coutRepas, { ph: 'ex. 12' })}
         </div>
+        ${inputField('Part payée par l\'employeur par repas (titres-restaurant, prime de panier) (€)', p + '.frais.partEmployeur', f.partEmployeur)}
+        <div class="verdict" id="repas-detail-${i}" style="margin-top:4px">${repasDetailHtml(i)}</div>
+
+        <h3>Télétravail</h3>
         ${inputField('Jours de télétravail / an', p + '.frais.joursTeletravail', f.joursTeletravail)}
 
         <h3>Autres frais (formation, double résidence, matériel…)</h3>
@@ -435,6 +671,124 @@
       </div>`;
   }
 
+  // ---------------------------------------------------------------- bulletins de salaire
+
+  const payslipsOf = (i, year) => (state.payslips || []).filter((p) => (p.declarant || 0) === i && (!year || p.month.startsWith(year + '-')))
+    .sort((a, b) => a.month.localeCompare(b.month));
+
+  function payslipBlock(i) {
+    const year = T().year;
+    const slips = payslipsOf(i, year);
+    const proj = window.PayslipImport.projectYear(slips, year);
+    const d = T().declarants[i];
+    const others = payslipsOf(i).filter((p) => !p.month.startsWith(year + '-')).length;
+    const msg = ui.payslipMsg && ui.payslipMsg.i === i ? ui.payslipMsg : null;
+    const lastLabel = proj ? monthLabel(proj.lastMonth) : '';
+    return `
+      <div class="row" style="margin-top:2px">
+        <label class="btn small primary">📄 Importer des bulletins de salaire (PDF)<input type="file" accept="application/pdf,.pdf" multiple data-action="import-payslip" data-i="${i}" hidden></label>
+        <button class="btn small" data-action="estimate-salary" data-i="${i}">Estimer depuis mes saisies</button>
+      </div>
+      ${msg ? `<p class="hint ${msg.bad ? 'neg' : 'pos'}" role="status">${msg.html}</p>` : ''}
+      <p class="hint">Le <b>net imposable</b> du bulletin est différent du net versé sur votre compte (il inclut notamment la CSG non déductible).
+      Les bulletins sont lus sur cet appareil et ne sont pas conservés : seuls les montants utiles sont enregistrés.</p>
+      ${proj ? `
+      <div class="verdict">
+        <strong>Estimation d'après ${proj.count} bulletin(s) ${year}</strong>
+        <div class="kv"><span>${proj.fromCumul ? `Cumul net imposable fin ${lastLabel}` : `Total des ${proj.knownMonths} bulletin(s)`}</span><span class="num">${eur(proj.knownNet)}</span></div>
+        ${proj.remaining ? `<div class="kv"><span>+ ${proj.remaining} mois × ${eur(proj.avgNet)} <span class="hint">(moyenne récente)</span></span><span class="num">${eur(proj.remaining * proj.avgNet)}</span></div>` : ''}
+        <div class="kv total"><span>Net imposable ${year} estimé</span><span class="num">${eur(proj.netImposable)}</span></div>
+        <div class="kv"><span>Prélevé à la source ${proj.remaining ? '(projeté)' : ''}</span><span class="num">${eur(proj.pas)}</span></div>
+        ${proj.taux != null ? `<div class="kv"><span>Taux du dernier bulletin</span><span class="num">${String(proj.taux).replace('.', ',')} %${proj.tauxType ? ' ' + proj.tauxType : ''}</span></div>` : ''}
+        ${Math.abs(num(d.netImposable) - proj.netImposable) > 0.5 ? `<button class="btn small primary block" data-action="apply-payslips" style="margin-top:8px">Utiliser cette estimation (${eur0(proj.netImposable)})</button>` : '<p class="hint pos" style="margin:6px 0 0">✓ Utilisée dans la simulation.</p>'}
+        ${proj.remaining ? '<p class="hint">Primes ou 13ᵉ mois à venir non inclus : le bulletin de décembre donnera le montant définitif à déclarer.</p>' : '<p class="hint">Bulletin de décembre importé : ce cumul est le montant à déclarer.</p>'}
+      </div>
+      <details style="margin-top:6px"><summary>Bulletins importés (${slips.length})</summary>
+        <ul class="list">${slips.slice().reverse().map((s) => `
+          <li><div class="grow"><div class="title" style="text-transform:capitalize">${monthLabel(s.month)}</div>
+            <div class="meta">net imposable ${eur(s.netImposable)}${s.pas && s.pas.montant != null ? ` · prélevé ${eur(s.pas.montant)}` : ''}${s.netPaye != null ? ` · versé ${eur(s.netPaye)}` : ''}${s.checkOk === false ? ' · <span class="neg">à vérifier</span>' : ''}</div></div>
+            <button class="iconbtn" data-action="del-payslip" data-id="${s.id}" aria-label="Supprimer le bulletin de ${monthLabel(s.month)}">×</button></li>`).join('')}</ul>
+      </details>` : ''}
+      ${others ? `<p class="hint">${others} bulletin(s) d'autres années enregistré(s) (changez l'année dans « Paramètres fiscaux » pour les voir).</p>` : ''}`;
+  }
+
+  /** Reporte les estimations des bulletins dans la simulation (net imposable, taux, total prélevé). */
+  function applyPayslips() {
+    const t = T();
+    const decl = t.couple ? [0, 1] : [0];
+    const projs = decl.map((i) => window.PayslipImport.projectYear(payslipsOf(i, t.year), t.year));
+    projs.forEach((p, i) => { if (p) t.declarants[i].netImposable = String(p.netImposable); });
+    const withTaux = projs.find((p) => p && p.taux != null);
+    if (withTaux) t.tauxPAS = String(withTaux.taux).replace('.', ',');
+    if (projs.every(Boolean)) t.dejaPreleve = String(C.round2(projs.reduce((a, p) => a + p.pas, 0)));
+    save();
+  }
+
+  async function importPayslips(files, i) {
+    ui.payslipMsg = { i, html: `Lecture de ${files.length} bulletin(s)…` };
+    render();
+    const ok = [], bad = [];
+    try {
+      const lib = await loadPdfjs();
+      for (const f of files) {
+        try {
+          const pages = await window.PayslipImport.extractPages(lib, new Uint8Array(await f.arrayBuffer()));
+          const r = window.PayslipImport.parsePayslip(pages);
+          if (r.netImposable == null || !r.month) { bad.push(`${f.name} : ${r.warnings[0] || 'illisible'}`); continue; }
+          state.payslips = (state.payslips || []).filter((p) => !((p.declarant || 0) === i && p.month === r.month));
+          state.payslips.push({
+            id: uid(), declarant: i, month: r.month, netImposable: r.netImposable, cumulNetImposable: r.cumulNetImposable,
+            brut: r.brut, netPaye: r.netPaye, pas: r.pas, checkOk: r.check.ok,
+          });
+          ok.push(r);
+          r.warnings.forEach((w) => bad.push(`${monthLabel(r.month)} : ${w}`));
+        } catch (e) {
+          bad.push(`${f.name} : ${e.message || e}`);
+        }
+      }
+    } catch (e) {
+      bad.push('Lecture des PDF impossible : ' + (e.message || e));
+    }
+    const years = [...new Set(ok.map((r) => Number(r.month.slice(0, 4))))];
+    if (ok.length && !years.includes(T().year) && years.length === 1
+      && confirm(`Ces bulletins concernent l'année ${years[0]}. Passer la simulation sur les revenus ${years[0]} ?`)) {
+      T().year = years[0];
+    }
+    if (ok.length) applyPayslips(); else save();
+    const done = ok.sort((a, b) => a.month.localeCompare(b.month)).map((r) => `${monthLabel(r.month)} : net imposable ${eur(r.netImposable)}${r.check.pasBaseMatches ? ' ✓' : ''}`);
+    ui.payslipMsg = {
+      i, bad: !ok.length,
+      html: [ok.length ? `${ok.length} bulletin(s) importé(s) — ${done.join(' · ')}` : 'Aucun bulletin importé.', ...bad.map(esc)].join('<br>'),
+    };
+    render();
+  }
+
+  /** Détail lisible du calcul des frais de repas d'un déclarant. */
+  function repasDetailHtml(i) {
+    const input = taxInput();
+    const params = { ...C.DEFAULT_TAX_PARAMS, ...input.params, year: input.year };
+    const custom = params.repasForfait != null && params.repasForfait !== '';
+    const forfait = C.repasFoyer(input.year, params);
+    const r = C.fraisRepas(input.declarants[i].frais, { ...params, repasForfait: forfait });
+    const lines = [];
+    if (r.maison.nb) {
+      lines.push(`<div class="kv"><span>Préparés à domicile : ${r.maison.nb} × ${r.part ? `(${eur(forfait)} − ${eur(r.part)})` : eur(forfait)}</span><span class="num">${eur(r.maison.total)}</span></div>`);
+    }
+    if (r.achetes.nb) {
+      lines.push(`<div class="kv"><span>Achetés : ${r.achetes.nb} × (${eur(r.achetes.prixRetenu)} − ${eur(forfait)}${r.part ? ` − ${eur(r.part)}` : ''})</span><span class="num">${eur(r.achetes.total)}</span></div>`);
+      if (r.achetes.plafonne) lines.push(`<p class="hint" style="margin:0">Prix plafonné à ${eur(params.repasPlafond)} par repas.</p>`);
+      if (!r.achetes.prix) lines.push('<p class="hint neg" style="margin:0">Indiquez le prix moyen que vous payez par repas.</p>');
+    }
+    if (r.prixTropBas) {
+      lines.push(`<p class="hint neg" style="margin:4px 0 0">⚠ Le prix saisi ne dépasse pas la valeur d'un repas pris au foyer (${eur(forfait)}${r.part ? ' + part employeur' : ''}) : aucune déduction.
+        S'il s'agit de repas préparés chez vous, saisissez-les plutôt sur la ligne « sans justificatif ».</p>`);
+    }
+    const origin = custom ? 'valeur saisie' : C.REPAS_FOYER[input.year] == null ? 'dernière valeur connue' : input.year >= 2026 ? 'annoncée, à confirmer sur impots.gouv' : 'impots.gouv';
+    return `<div class="kv total" style="margin-top:0;border-top:0;padding-top:0"><span>Frais de repas déductibles</span><span class="num">${eur(r.total)}</span></div>`
+      + (lines.length ? lines.join('') : '<p class="hint" style="margin:0">Aucun repas saisi.</p>')
+      + `<p class="hint" style="margin:4px 0 0">Valeur d'un repas pris au foyer, revenus ${input.year} : ${eur(forfait)} (${origin}). Modifiable dans « Paramètres fiscaux ».</p>`;
+  }
+
   function taxInput() {
     const t = T();
     const numify = (o) => {
@@ -445,7 +799,7 @@
     return {
       couple: t.couple, parts: num(t.parts) || (t.couple ? 2 : 1), tauxPAS: num(t.tauxPAS),
       dejaPreleve: String(t.dejaPreleve).trim() === '' ? '' : num(t.dejaPreleve),
-      autresRevenus: num(t.autresRevenus), params: t.params,
+      autresRevenus: num(t.autresRevenus), params: t.params, year: num(t.year) || new Date().getFullYear(),
       declarants: t.declarants.map((d) => ({ netImposable: num(d.netImposable), forceMode: d.forceMode, frais: numify(d.frais) })),
     };
   }
@@ -514,9 +868,9 @@
           <div class="grid2">
             ${[['abattementMin', 'Abattement 10 % min'], ['abattementMax', 'Abattement 10 % max'], ['plafondDemiPart', 'Plafond par demi-part'],
     ['decoteSingle', 'Décote personne seule'], ['decoteCouple', 'Décote couple'], ['decoteRate', 'Taux de décote'],
-    ['repasForfait', 'Valeur repas au domicile'], ['repasPlafond', 'Plafond coût repas'],
+    ['repasForfait', 'Valeur repas au foyer (vide = selon l\'année)'], ['repasPlafond', 'Plafond prix d\'un repas'],
     ['teletravailJour', 'Télétravail €/jour'], ['teletravailPlafond', 'Télétravail plafond']]
-    .map(([k, l]) => inputField(l, 'tax.params.' + k, p[k])).join('')}
+    .map(([k, l]) => inputField(l, 'tax.params.' + k, p[k] == null ? '' : p[k], k === 'repasForfait' ? { ph: String(C.repasFoyer(T().year, {})).replace('.', ',') + ' (' + T().year + ')' } : {})).join('')}
           </div>
           <button class="btn small danger" data-action="reset-params">Rétablir les valeurs par défaut</button>
         </details>
@@ -694,7 +1048,15 @@
 
   function viewSettings() {
     const th = state.settings.theme;
+    setTimeout(checkVersion, 0);
     return `
+      <div class="card">
+        <h2>Version de l'application</h2>
+        <div class="kv"><span>Version installée</span><span class="num"><b>${esc(APP_VERSION)}</b> · ${fmtDate(window.APP_VERSION_DATE)}</span></div>
+        <p class="hint" id="version-status" role="status">Vérification de la dernière version…</p>
+        <div id="version-action"></div>
+      </div>
+      ${trendSettingsCard()}
       <div class="card">
         <h2>Apparence</h2>
         <div class="seg">${[['auto', 'Auto'], ['light', 'Clair'], ['dark', 'Sombre']].map(([v, l]) => `<button data-action="theme" data-v="${v}" class="${th === v ? 'on' : ''}">${l}</button>`).join('')}</div>
@@ -710,9 +1072,10 @@
         <p class="hint">Vos données restent uniquement sur cet appareil. Exportez-les régulièrement pour ne rien perdre
         (ou pour les transférer sur un autre appareil).</p>
         <div class="row">
-          <button class="btn" data-action="export">Exporter (JSON)</button>
-          <label class="btn">Importer<input type="file" accept="application/json,.json" data-action="import" hidden></label>
+          <button class="btn" data-action="export">Exporter</button>
+          <label class="btn">Restaurer un fichier<input type="file" accept="application/json,.json,text/plain,.txt" data-action="import" hidden></label>
         </div>
+        <button class="btn small" data-action="paste-import" style="margin-top:8px">Coller une sauvegarde</button>
         <p class="hint">${state.entries.length} ligne(s) saisie(s) · ${state.planned.length} charge(s) programmée(s).</p>
       </div>
       <div class="card">
@@ -883,18 +1246,177 @@
     return { entries: e, planned };
   }
 
-  function exportData() {
-    const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
-    const name = `moneymanager-${new Date().toISOString().slice(0, 10)}.json`;
-    const file = new File([blob], name, { type: 'application/json' });
-    if (navigator.canShare && navigator.canShare({ files: [file] })) {
-      navigator.share({ files: [file], title: 'Sauvegarde MoneyManager' }).catch(() => {});
-      return;
-    }
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob); a.download = name;
-    document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  // ---------------------------------------------------------------- réglages des prédictions
+
+  function trendSettingsCard() {
+    const ex = trendExclude();
+    const win = C.predictionWindow(state.entries, C.monthKey());
+    const avgBy = (type) => {
+      const out = {};
+      state.entries.filter((e) => e.type === type && win.includes(e.month))
+        .forEach((e) => { out[e.category] = (out[e.category] || 0) + e.amount / (win.length || 1); });
+      return out;
+    };
+    const rows = (type) => {
+      const avg = avgBy(type);
+      const used = new Set(state.entries.filter((e) => e.type === type).map((e) => e.category).filter(Boolean));
+      ex[type].forEach((c) => used.add(c));
+      if (type === 'income') DEFAULT_CATS.income.forEach((c) => used.add(c));
+      const list = [...used].sort((a, b) => (avg[b] || 0) - (avg[a] || 0) || a.localeCompare(b));
+      if (!list.length) return '<p class="hint">Aucune catégorie utilisée pour l\'instant.</p>';
+      return list.map((c) => `
+        <label class="check" style="justify-content:space-between">
+          <span style="display:flex;gap:10px;align-items:center"><input type="checkbox" data-trend-ex="${type}" value="${esc(c)}" ${ex[type].includes(c) ? 'checked' : ''}>${esc(c)}</span>
+          <span class="num hint" style="margin:0">${avg[c] ? eur0(avg[c]) + '/mois' : '—'}</span>
+        </label>`).join('');
+    };
+    return `
+      <div class="card" id="trend-settings">
+        <h2>Prédictions</h2>
+        <p class="hint">Cochez les catégories à <b>ignorer</b> dans le calcul des tendances (dépenses exceptionnelles, remboursements entre proches…).
+        Elles restent visibles dans vos mois et votre bilan. Moyennes calculées sur ${win.length ? win.map(monthShort).join(', ') : '—'}
+        (le mois précédent est ignoré car il peut être incomplet).</p>
+        <h3>Dépenses ignorées</h3>
+        ${rows('expense')}
+        <h3>Revenus ignorés</h3>
+        <p class="hint">Par exemple « ${esc(C.SAVINGS_CATEGORY)} » pour les virements venant de votre Livret A :
+        classez-les dans cette catégorie (l'import des relevés le propose pour les virements reçus de vos propres comptes).</p>
+        ${rows('income')}
+      </div>`;
+  }
+
+  // ---------------------------------------------------------------- version
+
+  const APP_VERSION = window.APP_VERSION || '?';
+  const fmtDate = (iso) => (iso ? iso.split('-').reverse().join('/') : '');
+
+  /** Compare la version chargée avec celle publiée sur le serveur (sans passer par les caches). */
+  function checkVersion() {
+    const statusEl = document.getElementById('version-status');
+    if (!statusEl) return;
+    const set = (html, cls) => { statusEl.innerHTML = html; statusEl.className = 'hint ' + (cls || ''); };
+    if (!navigator.onLine) { set('Hors connexion : impossible de vérifier s\'il existe une version plus récente.'); return; }
+    fetch('js/version.js?t=' + Date.now(), { cache: 'no-store' })
+      .then((r) => { if (!r.ok) throw new Error(r.status); return r.text(); })
+      .then((txt) => {
+        const m = txt.match(/APP_VERSION\s*=\s*['"]([^'"]+)['"]/);
+        if (!m) throw new Error('format');
+        if (m[1] === APP_VERSION) { set('✓ Vous utilisez la dernière version.', 'pos'); return; }
+        set(`Une nouvelle version <b>${esc(m[1])}</b> est disponible.`, 'neg');
+        const act = document.getElementById('version-action');
+        if (act) act.innerHTML = '<button class="btn primary block" data-action="update-app">Mettre à jour maintenant</button>';
+      })
+      .catch(() => set('Impossible de vérifier la dernière version pour le moment.'));
+  }
+
+  async function updateApp() {
+    try {
+      const reg = 'serviceWorker' in navigator ? await navigator.serviceWorker.getRegistration() : null;
+      if (reg) await reg.update();
+      if ('caches' in window) await Promise.all((await caches.keys()).map((k) => caches.delete(k)));
+    } catch (e) { /* on recharge quand même */ }
+    location.reload();
+  }
+
+  // ---------------------------------------------------------------- sauvegarde (export / import)
+  // Chaque méthode est lancée directement par un appui (exigé par iOS/Android pour partager ou télécharger)
+  // et affiche toujours un message : plus aucun échec silencieux.
+
+  const backupName = () => `moneymanager-${new Date().toISOString().slice(0, 10)}.json`;
+  const backupText = () => JSON.stringify(state, null, 2);
+  const isIosStandalone = () => window.navigator.standalone === true;
+
+  function openExport() {
+    const kb = Math.max(1, Math.round(new Blob([backupText()]).size / 1024));
+    const fileShare = typeof navigator.canShare === 'function'
+      && navigator.canShare({ files: [new File(['{}'], 'test.json', { type: 'application/json' })] });
+    sheet().innerHTML = `
+      <form method="dialog">
+        <h2>Exporter mes données</h2>
+        <p class="hint">${state.entries.length} ligne(s), ${state.planned.length} charge(s) programmée(s) · ${kb} Ko.
+        Gardez la sauvegarde hors du téléphone (Drive, iCloud, e-mail à vous-même…).</p>
+        <div style="display:grid;gap:8px;margin-top:12px">
+          ${fileShare ? '<button type="button" class="btn primary" data-export="share">Partager le fichier…</button>' : ''}
+          <button type="button" class="btn ${fileShare ? '' : 'primary'}" data-export="download">Télécharger le fichier</button>
+          <button type="button" class="btn" data-export="copy">Copier le texte de la sauvegarde</button>
+          <button type="button" class="btn" data-export="close">Fermer</button>
+        </div>
+        ${isIosStandalone() ? '<p class="hint">Sur iPhone, depuis l\'application installée, le téléchargement peut être bloqué par iOS : utilisez « Partager » (› Enregistrer dans Fichiers) ou « Copier ».</p>' : ''}
+        <p class="hint" id="export-status" role="status"></p>
+      </form>`;
+    const status = (msg, bad) => {
+      const el = sheet().querySelector('#export-status');
+      el.textContent = msg; el.className = 'hint ' + (bad ? 'neg' : 'pos');
+    };
+    sheet().querySelectorAll('[data-export]').forEach((btn) => btn.addEventListener('click', () => {
+      const how = btn.dataset.export;
+      if (how === 'close') { sheet().close(); return; }
+      const text = backupText();
+      if (how === 'share') {
+        const file = new File([text], backupName(), { type: 'application/json' });
+        navigator.share({ files: [file] })
+          .then(() => status('Sauvegarde partagée.'))
+          .catch((e) => {
+            if (e && e.name === 'AbortError') status('Partage annulé.', true);
+            else status(`Partage impossible (${e && e.message ? e.message : e}). Essayez « Télécharger » ou « Copier ».`, true);
+          });
+      } else if (how === 'download') {
+        try {
+          const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+          const a = document.createElement('a');
+          a.href = url; a.download = backupName(); a.rel = 'noopener';
+          document.body.appendChild(a); a.click(); a.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 60000);
+          status(`Téléchargement de ${backupName()} lancé. Rien n'apparaît ? Utilisez « Partager » ou « Copier ».`);
+        } catch (e) {
+          status('Téléchargement impossible : ' + e.message, true);
+        }
+      } else if (how === 'copy') {
+        copyText(text).then(() => status('Texte copié : collez-le dans une note ou un e-mail. Pour le restaurer : Réglages › Coller une sauvegarde.'))
+          .catch(() => status('Copie impossible sur ce navigateur.', true));
+      }
+    }));
+    sheet().showModal();
+  }
+
+  function copyText(text) {
+    if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(text);
+    return new Promise((resolve, reject) => {
+      const ta = document.createElement('textarea');
+      ta.value = text; ta.setAttribute('readonly', ''); ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      const ok = document.execCommand('copy'); ta.remove();
+      ok ? resolve() : reject(new Error('copy'));
+    });
+  }
+
+  function restoreBackup(txt) {
+    let s;
+    try { s = JSON.parse(txt); } catch (e) { throw new Error('ce n\'est pas une sauvegarde MoneyManager (JSON illisible)'); }
+    if (!s || !Array.isArray(s.entries)) throw new Error('ce n\'est pas une sauvegarde MoneyManager');
+    if (!confirm(`Restaurer ${s.entries.length} ligne(s) ? Les données actuelles seront remplacées.`)) return false;
+    localStorage.setItem(KEY, JSON.stringify(s));
+    state = load(); applyTheme(); render(); toast('Sauvegarde restaurée');
+    return true;
+  }
+
+  function openPasteImport() {
+    sheet().innerHTML = `
+      <form method="dialog">
+        <h2>Coller une sauvegarde</h2>
+        <p class="hint">Collez le texte copié avec « Exporter › Copier le texte ».</p>
+        <textarea id="paste-backup" rows="8" style="width:100%;border-radius:10px;border:1px solid var(--border);background:var(--surface-2);padding:10px;font:13px ui-monospace,monospace" placeholder='{"version":1,"entries":[…]}'></textarea>
+        <p class="hint neg" id="paste-status"></p>
+        <div class="row" style="margin-top:8px">
+          <button type="button" class="btn" data-paste="cancel">Annuler</button>
+          <button type="button" class="btn primary" data-paste="ok">Restaurer</button>
+        </div>
+      </form>`;
+    sheet().querySelector('[data-paste="cancel"]').addEventListener('click', () => sheet().close());
+    sheet().querySelector('[data-paste="ok"]').addEventListener('click', () => {
+      try { if (restoreBackup(sheet().querySelector('#paste-backup').value)) sheet().close(); } catch (e) { sheet().querySelector('#paste-status').textContent = 'Restauration impossible : ' + e.message; }
+    });
+    sheet().showModal();
   }
 
   function applyTheme() {
@@ -942,10 +1464,33 @@
     'add-frais': (el) => { T().declarants[Number(el.dataset.i)].frais.autres.push({ label: '', amount: '' }); save(); render(); },
     'del-frais': (el) => { T().declarants[Number(el.dataset.i)].frais.autres.splice(Number(el.dataset.k), 1); save(); render(); },
     'estimate-salary': (el) => estimateSalary(Number(el.dataset.i)),
+    'apply-payslips': () => { applyPayslips(); render(); toast('Estimation des bulletins appliquée'); },
+    'del-payslip': (el) => {
+      const s = (state.payslips || []).find((p) => p.id === el.dataset.id);
+      if (!s || !confirm(`Supprimer le bulletin de ${monthLabel(s.month)} ?`)) return;
+      state.payslips = state.payslips.filter((p) => p !== s);
+      applyPayslips(); ui.payslipMsg = null; render();
+    },
     'plan-regul': planRegul,
     'reset-params': () => { if (confirm('Rétablir les paramètres fiscaux par défaut ?')) { T().params = JSON.parse(JSON.stringify(C.DEFAULT_TAX_PARAMS)); save(); render(); } },
     theme: (el) => { state.settings.theme = el.dataset.v; save(); applyTheme(); render(); },
-    export: exportData,
+    export: openExport,
+    'paste-import': openPasteImport,
+    'hist-filter': openHistoryFilter,
+    'hist-filter-reset': () => { state.settings.historyHidden = []; save(); render(); },
+    'open-category': (el) => {
+      ui.cat = { name: el.dataset.cat, year: Number(el.dataset.year || C.monthKey().slice(0, 4)), from: ui.tab };
+      ui.tab = 'category'; render(); window.scrollTo(0, 0);
+    },
+    'cat-back': () => { ui.tab = (ui.cat && ui.cat.from) || 'history'; render(); window.scrollTo(0, 0); },
+    'cat-year': (el) => { ui.cat.year += Number(el.dataset.d); render(); },
+    'goto-trend-settings': (el, ev) => {
+      if (ev) ev.preventDefault();
+      ui.tab = 'settings'; render();
+      const card = document.getElementById('trend-settings');
+      if (card) card.scrollIntoView({ block: 'start' });
+    },
+    'update-app': updateApp,
     demo: () => {
       if ((state.entries.length || state.planned.length) && !confirm('Remplacer vos données actuelles par l\'exemple ?')) return;
       Object.assign(state, demoData()); save(); render(); toast('Exemple chargé');
@@ -975,17 +1520,25 @@
   document.addEventListener('change', (ev) => {
     const el = ev.target;
     if (el.dataset.action === 'toggle-variable') handlers['toggle-variable'](el);
+    if (el.dataset.trendEx) {
+      const t = trendExclude();
+      const list = t[el.dataset.trendEx];
+      const i = list.indexOf(el.value);
+      if (el.checked && i < 0) list.push(el.value);
+      if (!el.checked && i >= 0) list.splice(i, 1);
+      state.settings.trendExclude = t;
+      save();
+      toast(el.checked ? `« ${el.value} » ignorée dans les prédictions` : `« ${el.value} » de nouveau prise en compte`);
+    }
     if (el.dataset.action === 'import' && el.files[0]) {
-      el.files[0].text().then((txt) => {
-        const s = JSON.parse(txt);
-        if (!Array.isArray(s.entries)) throw new Error('fichier invalide');
-        if (!confirm(`Importer ${s.entries.length} ligne(s) ? Les données actuelles seront remplacées.`)) return;
-        localStorage.setItem(KEY, JSON.stringify(s));
-        state = load(); applyTheme(); render(); toast('Import réussi');
-      }).catch((e) => toast('Import impossible : ' + e.message));
+      el.files[0].text().then(restoreBackup).catch((e) => toast('Restauration impossible : ' + e.message))
+        .finally(() => { el.value = ''; });
     }
     if (el.dataset.bind && (el.tagName === 'SELECT' || el.type === 'checkbox')) bindInput(el);
     if (el.dataset.action === 'import-pdf' && el.files[0]) readStatement(el.files[0]);
+    if (el.dataset.action === 'import-payslip' && el.files.length) {
+      importPayslips([...el.files], Number(el.dataset.i)).finally(() => { el.value = ''; });
+    }
     if (el.dataset.imp && ui.imp && ui.imp.rows) {
       const r = ui.imp.rows[Number(el.dataset.i)];
       if (el.dataset.imp === 'include') { r.include = el.checked; el.closest('li').style.opacity = el.checked ? '' : '.55'; }
@@ -1002,11 +1555,13 @@
   function bindInput(el) {
     const path = el.dataset.bind;
     let v = el.type === 'checkbox' ? el.checked : el.value;
-    if (path.startsWith('tax.params.') || path === 'tax.year') v = num(v);
+    if (path === 'tax.params.repasForfait' && String(v).trim() === '') v = null; // vide = valeur de l'année
+    else if (path.startsWith('tax.params.') || path === 'tax.year') v = num(v);
     setPath(path, v);
     save();
     const res = document.getElementById('tax-results');
     if (res) res.innerHTML = taxResults();
+    [0, 1].forEach((k) => { const box = document.getElementById('repas-detail-' + k); if (box) box.innerHTML = repasDetailHtml(k); });
   }
 
   // ---------------------------------------------------------------- rendu
@@ -1018,13 +1573,14 @@
     tax: ['Impôts', viewTax],
     settings: ['Réglages', viewSettings],
     import: ['Importer un relevé', viewImport],
+    category: ['Catégorie', viewCategory],
   };
   function render() {
     hideTip();
     const [title, fn] = VIEWS[ui.tab];
-    document.getElementById('view-title').textContent = title;
+    document.getElementById('view-title').textContent = ui.tab === 'category' ? ui.cat.name : title;
     document.getElementById('view').innerHTML = fn();
-    const tabFor = ui.tab === 'import' ? 'month' : ui.tab;
+    const tabFor = ui.tab === 'import' ? 'month' : ui.tab === 'category' ? (ui.cat.from || 'history') : ui.tab;
     document.querySelectorAll('.tabbar button').forEach((b) => b.classList.toggle('active', b.dataset.tab === tabFor));
   }
   document.querySelectorAll('.tabbar button').forEach((b) => b.addEventListener('click', () => {

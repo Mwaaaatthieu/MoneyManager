@@ -84,14 +84,111 @@
     };
   }
 
+  // ---------- Tendances et prédiction ----------
+
+  /** Catégorie des virements venant de l'épargne (Livret A…) : ignorée par défaut dans les revenus prévus. */
+  const SAVINGS_CATEGORY = 'Virement depuis épargne';
+
   /**
-   * Projection sur `horizon` mois à partir de `current` (inclus).
-   * options.includeVariable : intègre la moyenne des dépenses/revenus ponctuels.
+   * L'opération est-elle écartée du calcul des tendances ?
+   * Uniquement selon sa catégorie : exclude = { expense: [catégories], income: [catégories] }.
+   */
+  function isTrendExcluded(e, exclude) {
+    const list = (exclude && exclude[e.type]) || [];
+    return list.includes(e.category);
+  }
+
+  /**
+   * Mois de référence des prédictions : les 6 mois qui précèdent le mois PRÉCÉDENT celui en cours
+   * (le mois précédent est ignoré car il peut être incomplet, ex. relevé pas encore importé).
+   */
+  function predictionWindow(entries, current) {
+    return referenceWindow(entries, addMonths(current, -1), 6);
+  }
+
+  /**
+   * Prédit les revenus et dépenses du mois `target` à partir des 6 mois qui précèdent le mois
+   * précédant `current` (voir predictionWindow).
+   * - lignes fixes : dernier montant connu (si vues dans les 2 derniers mois de référence) ;
+   * - lignes variables : moyenne par catégorie sur ≤ 6 mois, pondérée (le mois le plus récent compte le plus) ;
+   * - + charges/revenus programmés du mois cible ; catégories exclues écartées.
+   */
+  function predictMonth(state, current, target, options) {
+    options = options || {};
+    const exclude = options.exclude || {};
+    const entries = state.entries || [];
+    const win = predictionWindow(entries, current);
+    const inWin = new Set(win);
+    const used = entries.filter((e) => inWin.has(e.month));
+    const kept = used.filter((e) => !isTrendExcluded(e, exclude));
+    const excluded = used.filter((e) => isTrendExcluded(e, exclude));
+
+    // Lignes fixes : somme par (sens, libellé) et par mois, on garde le mois le plus récent.
+    const recent = new Set(win.slice(-2));
+    const recByKey = {};
+    kept.filter((e) => e.recurring && recent.has(e.month)).forEach((e) => {
+      const key = e.type + '|' + String(e.label || e.category || '').trim().toLowerCase();
+      const cur = recByKey[key];
+      if (!cur || e.month > cur.month) recByKey[key] = { type: e.type, label: e.label, category: e.category, amount: e.amount, month: e.month };
+      else if (e.month === cur.month) cur.amount += e.amount;
+    });
+    const recurringLines = Object.values(recByKey).map((l) => ({ ...l, amount: round2(l.amount) }))
+      .sort((a, b) => b.amount - a.amount);
+
+    // Lignes variables : moyenne pondérée par catégorie.
+    const weights = {};
+    win.forEach((m, i) => { weights[m] = i + 1; });
+    const totalWeight = sum(win.map((m) => weights[m]));
+    const variable = { income: {}, expense: {} };
+    kept.filter((e) => !e.recurring).forEach((e) => {
+      const bucket = variable[e.type];
+      const cat = e.category || 'Autre';
+      bucket[cat] = (bucket[cat] || 0) + (e.amount * weights[e.month]) / totalWeight;
+    });
+
+    const planned = (state.planned || []).filter((p) => p.month === target);
+    const side = (type) => {
+      const byCategory = {};
+      recurringLines.filter((l) => l.type === type).forEach((l) => { const c = l.category || 'Autre'; byCategory[c] = (byCategory[c] || 0) + l.amount; });
+      Object.entries(variable[type]).forEach(([c, v]) => { byCategory[c] = (byCategory[c] || 0) + v; });
+      const pl = planned.filter((p) => (p.type === 'income' ? 'income' : 'expense') === type);
+      pl.forEach((p) => { const c = p.category || 'Autre'; byCategory[c] = (byCategory[c] || 0) + p.amount; });
+      Object.keys(byCategory).forEach((c) => { byCategory[c] = round2(byCategory[c]); });
+      const fixed = round2(sum(recurringLines.filter((l) => l.type === type), (l) => l.amount));
+      const vari = round2(sum(Object.values(variable[type])));
+      const plannedSum = round2(sum(pl, (p) => p.amount));
+      return { fixed, variable: vari, planned: plannedSum, total: round2(fixed + vari + plannedSum), byCategory };
+    };
+    const income = side('income');
+    const expense = side('expense');
+    return {
+      month: target,
+      window: win,
+      skippedMonth: addMonths(current, -1),
+      income,
+      expense,
+      balance: round2(income.total - expense.total),
+      recurringLines,
+      plannedItems: planned,
+      excluded: {
+        count: excluded.length,
+        savingsIncome: round2(sum(excluded.filter((e) => e.type === 'income'), (e) => e.amount) / (win.length || 1)),
+        expense: round2(sum(excluded.filter((e) => e.type === 'expense'), (e) => e.amount) / (win.length || 1)),
+      },
+    };
+  }
+
+  /**
+   * Projection sur `horizon` mois à partir de `current` (inclus), avec la même méthode que predictMonth.
+   * options.includeVariable : intègre les dépenses/revenus variables ; options.exclude : catégories écartées.
    */
   function forecast(state, current, horizon, options) {
     options = options || {};
-    const win = referenceWindow(state.entries, current, 6);
-    const avg = averages(state.entries, win);
+    const base = predictMonth({ ...state, planned: [] }, current, current, options);
+    const avg = {
+      recIncome: base.income.fixed, varIncome: base.income.variable,
+      recExpense: base.expense.fixed, varExpense: base.expense.variable, months: base.window,
+    };
     const planned = state.planned || [];
     const rows = [];
     let cumulative = 0;
@@ -115,7 +212,7 @@
         cumulative: round2(cumulative),
       });
     }
-    return { window: win, averages: avg, rows };
+    return { window: base.window, averages: avg, rows };
   }
 
   /** Montant à mettre de côté chaque mois pour couvrir les charges programmées à venir. */
@@ -152,11 +249,47 @@
     decoteCouple: 1470,
     decoteRate: 0.4525,
     seuilRecouvrement: 61,
-    repasForfait: 5.35, // valeur d'un repas pris au domicile
-    repasPlafond: 20.70, // plafond du coût d'un repas retenu
+    repasForfait: null, // valeur d'un repas pris au foyer : null = selon l'année (REPAS_FOYER)
+    repasPlafond: 20.70, // plafond du prix d'un repas retenu
     teletravailJour: 2.70,
     teletravailPlafond: 659.70,
   };
+
+  /**
+   * Valeur d'un repas pris au foyer, par année de revenus (impots.gouv).
+   * 2026 : 5,50 € annoncé, à confirmer lors de la publication du barème (printemps 2027).
+   */
+  const REPAS_FOYER = { 2023: 5.20, 2024: 5.35, 2025: 5.45, 2026: 5.50 };
+  function repasFoyer(year, params) {
+    if (params && params.repasForfait != null && params.repasForfait !== '') return Number(params.repasForfait);
+    const years = Object.keys(REPAS_FOYER).map(Number).sort();
+    const y = Number(year) || years[years.length - 1];
+    if (REPAS_FOYER[y] != null) return REPAS_FOYER[y];
+    return y < years[0] ? REPAS_FOYER[years[0]] : REPAS_FOYER[years[years.length - 1]];
+  }
+
+  /**
+   * Frais de repas pris sur le lieu de travail (obligation de ne pas rentrer déjeuner).
+   * - repas achetés, avec justificatifs : (prix payé plafonné − valeur du repas au foyer − part employeur) par repas ;
+   * - repas préparés au domicile, sans justificatif : forfait = valeur du repas au foyer (− part employeur) par repas.
+   */
+  function fraisRepas(i, params) {
+    const forfait = params.repasForfait;
+    const part = Math.max(0, i.partEmployeur || 0);
+    const nbA = Math.max(0, i.nbRepas || 0);
+    const prix = Math.max(0, i.coutRepas || 0);
+    const prixRetenu = Math.min(prix, params.repasPlafond);
+    const parRepasA = Math.max(0, prixRetenu - forfait - part);
+    const nbM = Math.max(0, i.nbRepasMaison || 0);
+    const parRepasM = Math.max(0, forfait - part);
+    const achetes = { nb: nbA, prix, prixRetenu, plafonne: prix > params.repasPlafond, parRepas: round2(parRepasA), total: round2(nbA * parRepasA) };
+    const maison = { nb: nbM, parRepas: round2(parRepasM), total: round2(nbM * parRepasM) };
+    return {
+      forfait, part, achetes, maison,
+      total: round2(achetes.total + maison.total),
+      prixTropBas: nbA > 0 && prix > 0 && parRepasA === 0,
+    };
+  }
 
   /** Barème kilométrique automobile (frais réels) — revenus 2024. */
   const BAREME_KM = {
@@ -186,11 +319,11 @@
   function fraisReels(input, params) {
     const i = input || {};
     const km = kmAllowance(i.cv, (i.kmJour || 0) * 2 * (i.joursTrajet || 0) + (i.kmAutres || 0), i.electric);
-    const coutRetenu = Math.min(i.coutRepas || 0, params.repasPlafond);
-    const repas = round2(Math.max(0, coutRetenu - params.repasForfait) * (i.nbRepas || 0));
+    const repasDetail = fraisRepas(i, { ...params, repasForfait: repasFoyer(params.year, params) });
+    const repas = repasDetail.total;
     const teletravail = round2(Math.min((i.joursTeletravail || 0) * params.teletravailJour, params.teletravailPlafond));
     const autres = round2(sum(i.autres || [], (x) => Number(x.amount) || 0));
-    return { km, repas, teletravail, autres, total: round2(km + repas + teletravail + autres) };
+    return { km, repas, repasDetail, teletravail, autres, total: round2(km + repas + teletravail + autres) };
   }
 
   function baremeImpot(revenuParPart, brackets) {
@@ -251,7 +384,7 @@
    *         tauxPAS (%), dejaPreleve (optionnel), params }
    */
   function simulateTax(tax) {
-    const params = { ...DEFAULT_TAX_PARAMS, ...(tax.params || {}) };
+    const params = { ...DEFAULT_TAX_PARAMS, ...(tax.params || {}), year: tax.year };
     const declarants = (tax.declarants || []).slice(0, tax.couple ? 2 : 1).map((d) => {
       const net = Number(d.netImposable) || 0;
       const abat = abattement10(net, params);
@@ -297,7 +430,8 @@
   const Calc = {
     monthKey, addMonths, monthsBetween, round2,
     monthSummary, referenceWindow, averages, forecast, provisions,
-    DEFAULT_TAX_PARAMS, BAREME_KM, kmAllowance, abattement10, fraisReels,
+    predictMonth, predictionWindow, isTrendExcluded, SAVINGS_CATEGORY,
+    DEFAULT_TAX_PARAMS, BAREME_KM, REPAS_FOYER, repasFoyer, fraisRepas, kmAllowance, abattement10, fraisReels,
     baremeImpot, impotRevenu, simulateTax,
   };
 
