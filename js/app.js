@@ -189,11 +189,15 @@
 
   function viewMonth() {
     const m = ui.month;
-    const s = C.monthSummary(state.entries, m);
+    // Mouvements du Livret A séparés : ni revenus ni dépenses, ils forment l'épargne réelle du mois.
+    const sc = savingsCats();
+    const isSav = (e) => C.isSavingsMove(e, sc);
+    const s = C.savingsSummary(state.entries, m, sc);
     const list = state.entries.filter((e) => e.month === m);
-    const incomes = list.filter((e) => e.type === 'income').sort((a, b) => b.amount - a.amount);
-    const expenses = list.filter((e) => e.type === 'expense')
+    const incomes = list.filter((e) => e.type === 'income' && !isSav(e)).sort((a, b) => b.amount - a.amount);
+    const expenses = list.filter((e) => e.type === 'expense' && !isSav(e))
       .sort((a, b) => (b.recurring - a.recurring) || (b.amount - a.amount));
+    const savingsMoves = list.filter(isSav).sort((a, b) => (a.type === b.type ? b.amount - a.amount : a.type === 'expense' ? -1 : 1));
     const imported = list.filter((e) => e.importKey).length;
     const planned = state.planned.filter((p) => p.month === m);
     const prev = C.addMonths(m, -1);
@@ -223,9 +227,12 @@
         <div class="stat"><div class="lbl"><i class="dot income"></i>Revenus</div><div class="val num">${eur0(s.income)}</div></div>
         <div class="stat"><div class="lbl"><i class="dot expense"></i>Dépenses</div><div class="val num">${eur0(s.expense)}</div>
           <div class="sub">fixes ${eur0(s.fixedExpense)} · variables ${eur0(s.variableExpense)}</div></div>
-        <div class="stat wide"><div class="lbl">Solde du mois (épargne)</div>
+        <div class="stat"><div class="lbl"><i class="dot saving"></i>Épargne réelle</div>
+          <div class="val num ${cls(s.savings)}">${signed(s.savings)}</div>
+          <div class="sub">${s.deposits || s.withdrawals ? `versé ${eur0(s.deposits)} · retiré ${eur0(s.withdrawals)}` : 'Livret A : aucun mouvement'}</div></div>
+        <div class="stat"><div class="lbl">Revenus − dépenses</div>
           <div class="val num ${cls(s.balance)}">${signed(s.balance)}</div>
-          <div class="sub">Taux d'épargne : ${pct(s.savingsRate)}</div></div>
+          <div class="sub">taux d'épargne réel ${pct(s.realSavingsRate, 0)}</div></div>
       </div>
 
       ${predictionCard(m, s)}
@@ -260,6 +267,20 @@
         <h2>Dépenses</h2>
         ${expenses.length ? `<ul class="list">${expenses.map(item).join('')}</ul>` : '<div class="empty">Aucune dépense saisie. Touchez « + » pour commencer.</div>'}
       </div>
+      ${savingsMoves.length ? `
+      <div class="card">
+        <div class="kv" style="padding:0 0 4px"><h2 style="margin:0">Épargne (Livret A)</h2><span class="num ${cls(s.savings)}"><b>${signed(s.savings)}</b></span></div>
+        <ul class="list">${savingsMoves.map((e) => `
+          <li class="tap" data-action="edit-entry" data-id="${e.id}">
+            <div class="grow">
+              <div class="title">${esc(e.label)}${e.recurring ? '<span class="tag">fixe</span>' : ''}</div>
+              <div class="meta">${e.date ? e.date.slice(8, 10) + '/' + e.date.slice(5, 7) + ' · ' : ''}${e.type === 'expense' ? 'versement' : 'retrait'} · ${esc(e.category || '')}</div>
+            </div>
+            <div class="num ${e.type === 'expense' ? 'pos' : 'neg'}">${e.type === 'expense' ? '+' : '−'}${eur(e.amount)}</div>
+          </li>`).join('')}</ul>
+        <p class="hint">Versements (+) et retraits (−) du Livret A : ils ne comptent ni dans les revenus ni dans les dépenses.
+          <a href="#" data-action="goto-savings-settings">Régler les catégories</a></p>
+      </div>` : ''}
 
       ${cats.length ? `
       <div class="card">
